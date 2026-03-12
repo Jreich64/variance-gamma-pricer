@@ -122,6 +122,9 @@ with tab_curves:
         m_lo, m_hi = st.columns(2)
         moneyness_lo = m_lo.number_input("Min moneyness (S/K)", value=0.7, min_value=0.01, step=0.05, format="%.2f")
         moneyness_hi = m_hi.number_input("Max moneyness (S/K)", value=1.3, min_value=0.1, step=0.05, format="%.2f")
+        t_lo, t_hi = st.columns(2)
+        T_surf_lo = t_lo.number_input("3D Min expiry (T)", value=0.1, min_value=0.01, step=0.05, format="%.2f", key="t_surf_lo")
+        T_surf_hi = t_hi.number_input("3D Max expiry (T)", value=2.0, min_value=0.05, step=0.1, format="%.2f", key="t_surf_hi")
         submitted_curves = st.form_submit_button("Compute Curves")
 
     # Compute on form submit, cache in session_state
@@ -163,11 +166,8 @@ with tab_curves:
                 ad_data[gn] = np.array(ad_data[gn])
 
         # ── 3D Surfaces ───────────────────────────────────────────────
-        T_min_s, T_max_s = 0.1, 2.0
-        n_T_surf = 25
-        n_M_surf = 40
-        T_range = np.linspace(T_min_s, T_max_s, n_T_surf)
-        m_range = np.linspace(moneyness_lo, moneyness_hi, n_M_surf)
+        T_range = np.linspace(T_surf_lo, T_surf_hi, n_pts)
+        m_range = np.linspace(moneyness_lo, moneyness_hi, n_pts)
         K_surf = S / m_range
 
         surface_names = ["price", "delta", "gamma", "theta", "vega", "rho", "d_theta_param", "d_nu"]
@@ -176,25 +176,25 @@ with tab_curves:
                           "d_theta_param": "d/d(theta_VG)", "d_nu": "d/d(nu)"}
 
         progress_3d = st.progress(0, text="Computing analytical 3D surfaces...")
-        an_surfaces = {gn: np.zeros((n_T_surf, n_M_surf)) for gn in surface_names}
+        an_surfaces = {gn: np.zeros((n_pts, n_pts)) for gn in surface_names}
         for i, t in enumerate(T_range):
             for j, k in enumerate(K_surf):
                 g = model.greeks(k, t, "call")
                 for gn in surface_names:
                     an_surfaces[gn][i, j] = g[gn]
-            progress_3d.progress((i + 1) / n_T_surf)
+            progress_3d.progress((i + 1) / n_pts)
         progress_3d.empty()
 
         ad_surfaces = None
         if _HAS_TORCH:
             progress_3d_ad = st.progress(0, text="Computing autodiff 3D surfaces...")
-            ad_surfaces = {gn: np.zeros((n_T_surf, n_M_surf)) for gn in surface_names}
+            ad_surfaces = {gn: np.zeros((n_pts, n_pts)) for gn in surface_names}
             for i, t in enumerate(T_range):
                 for j, k in enumerate(K_surf):
                     g = model.greeks_ad(k, t, "call")
                     for gn in surface_names:
                         ad_surfaces[gn][i, j] = g[gn]
-                progress_3d_ad.progress((i + 1) / n_T_surf)
+                progress_3d_ad.progress((i + 1) / n_pts)
             progress_3d_ad.empty()
 
         # Store everything in session_state
