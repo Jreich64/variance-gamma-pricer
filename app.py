@@ -6,6 +6,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from variance_gamma import VarianceGammaModel, _HAS_TORCH
+import vg_mpmath
 
 st.set_page_config(page_title="Variance Gamma Pricer", layout="wide")
 st.title("Variance Gamma Option Pricer")
@@ -55,10 +56,11 @@ def _sidebar_params_key():
 
 
 # ── Tabs ───────────────────────────────────────────────────────────────────
-tab_single, tab_curves, tab_greeks, tab_calib = st.tabs([
+tab_single, tab_curves, tab_greeks, tab_arb, tab_calib = st.tabs([
     "Single-Point Pricer",
     "Price Curves & Greeks",
     "Greeks (Custom)",
+    "Arbitrary Precision 3D",
     "Calibration",
 ])
 
@@ -450,7 +452,115 @@ with tab_greeks:
         st.plotly_chart(fig, use_container_width=True)
 
 # ═══════════════════════════════════════════════════════════════════════════
-# TAB 4 — Calibration
+# TAB 4 — Arbitrary Precision 3D Surfaces (mpmath)
+# ═══════════════════════════════════════════════════════════════════════════
+with tab_arb:
+    st.subheader("Arbitrary Precision 3D Surfaces (mpmath)")
+    st.caption(
+        "Uses mpmath adaptive quadrature (not FFT) with user-selectable decimal precision. "
+        "Computes call price, analytical delta, and analytical gamma. "
+        "**Much slower** than FFT — keep grid sizes small (≤ 15)."
+    )
+
+    with st.form("arb_form"):
+        ac1, ac2, ac3 = st.columns(3)
+        arb_dps = int(ac1.number_input(
+            "Decimal places (dps)", value=30, min_value=10, max_value=200, step=5, key="arb_dps"
+        ))
+        arb_n_pts = int(ac2.number_input(
+            "Grid points", value=8, min_value=3, max_value=30, step=1, key="arb_npts"
+        ))
+        arb_opt = ac3.selectbox("Option Type", ["call", "put"], key="arb_opt")
+
+        am1, am2 = st.columns(2)
+        arb_m_lo = am1.number_input("Min moneyness (S/K)", value=0.8, min_value=0.01, step=0.05, format="%.2f", key="arb_mlo")
+        arb_m_hi = am2.number_input("Max moneyness (S/K)", value=1.2, min_value=0.1, step=0.05, format="%.2f", key="arb_mhi")
+
+        at1, at2 = st.columns(2)
+        arb_T_lo = at1.number_input("Min expiry (T)", value=0.1, min_value=0.01, step=0.05, format="%.2f", key="arb_tlo")
+        arb_T_hi = at2.number_input("Max expiry (T)", value=1.5, min_value=0.05, step=0.1, format="%.2f", key="arb_thi")
+
+        submitted_arb = st.form_submit_button("Compute Surfaces")
+
+    if submitted_arb:
+        vg_mpmath.set_precision(arb_dps)
+
+        m_range_arb = np.linspace(arb_m_lo, arb_m_hi, arb_n_pts)
+        T_range_arb = np.linspace(arb_T_lo, arb_T_hi, arb_n_pts)
+        K_range_arb = S / m_range_arb
+
+        arb_surfaces = {
+            "price": np.zeros((arb_n_pts, arb_n_pts)),
+            "delta": np.zeros((arb_n_pts, arb_n_pts)),
+            "gamma": np.zeros((arb_n_pts, arb_n_pts)),
+        }
+
+        total_steps = arb_n_pts * arb_n_pts
+        progress_arb = st.progress(0, text=f"Computing mpmath surfaces ({arb_dps} dps)...")
+        t0_arb = time.perf_counter()
+
+        step = 0
+        for i, t_val in enumerate(T_range_arb):
+            for j, k_val in enumerate(K_range_arb):
+                px, dlt, gma, _, _, _ = vg_mpmath.call_price(
+                    S, r, q, sigma, theta_vg, nu, float(t_val), float(k_val)
+                )
+                arb_surfaces["price"][i, j] = float(px)
+                arb_surfaces["delta"][i, j] = float(dlt)
+                arb_surfaces["gamma"][i, j] = float(gma)
+
+                # Put-call parity adjustments
+                if arb_opt == "put":
+                    call_px = float(px)
+                    put_px = call_px - S * np.exp(-q * float(t_val)) + float(k_val) * np.exp(-r * float(t_val))
+                    arb_surfaces["price"][i, j] = put_px
+                    arb_surfaces["delta"][i, j] = float(dlt) - np.exp(-q * float(t_val))
+                    # gamma is same for call and put
+
+                step += 1
+                progress_arb.progress(step / total_steps)
+
+        t_arb_elapsed = time.perf_counter() - t0_arb
+        progress_arb.empty()
+
+        st.session_state["tab_arb"] = {
+            "arb_surfaces": arb_surfaces,
+            "m_range_arb": m_range_arb,
+            "T_range_arb": T_range_arb,
+            "t_arb_elapsed": t_arb_elapsed,
+            "arb_dps": arb_dps,
+            "arb_opt": arb_opt,
+            "params_key": _sidebar_params_key(),
+        }
+
+    if "tab_arb" in st.session_state and st.session_state["tab_arb"]["params_key"] == _sidebar_params_key():
+        _ta = st.session_state["tab_arb"]
+
+        st.metric("Computation Time", f"{_ta['t_arb_elapsed']:.2f} s")
+        st.info(f"Precision: **{_ta['arb_dps']}** decimal places  |  Option: **{_ta['arb_opt'].title()}**")
+
+        arb_labels = {"price": "Call Price" if _ta["arb_opt"] == "call" else "Put Price",
+                      "delta": "Delta", "gamma": "Gamma"}
+
+        for gn in ["price", "delta", "gamma"]:
+            fig_arb = go.Figure(data=[go.Surface(
+                x=_ta["m_range_arb"], y=_ta["T_range_arb"], z=_ta["arb_surfaces"][gn],
+                colorscale="Plasma",
+            )])
+            fig_arb.update_layout(
+                title=f"Arbitrary Precision {arb_labels[gn]} ({_ta['arb_dps']} dps)",
+                scene=dict(
+                    xaxis_title="Moneyness (S/K)",
+                    yaxis_title="Expiry (T)",
+                    zaxis_title=arb_labels[gn],
+                ),
+                height=500, margin=dict(t=50, b=10),
+            )
+            plot_3d_with_download(fig_arb, f"mpmath_{gn}_surface.html", key_prefix=f"arb_{gn}")
+            st.markdown("<br>", unsafe_allow_html=True)
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TAB 5 — Calibration
 # ═══════════════════════════════════════════════════════════════════════════
 with tab_calib:
     st.subheader("Calibrate VG Parameters to Market Prices")
