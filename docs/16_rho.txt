@@ -1,0 +1,59 @@
+Function: rho(self, K, T, option_type='call', N=4096, alpha=1.5, eta=0.25)
+Location: variance_gamma.py, VarianceGammaModel class
+Type: Public method (Analytical Greek)
+
+================================================================================
+PURPOSE
+================================================================================
+Computes the analytical rho, dC/dr, via the Carr-Madan FFT framework. Rho
+measures the sensitivity of the option price to changes in the risk-free
+interest rate r.
+
+================================================================================
+MATHEMATICAL FORMULA
+================================================================================
+The rate r appears in the discount factor exp(-r*T) and in the drift term
+i*v*(r-q+omega)*T of the characteristic function. Differentiating:
+
+  d(phi)/dr = i*v*T * phi(v, T)
+
+The full derivative of the discounted integrand:
+
+  d/dr [ exp(-r*T) * phi / D ] = exp(-r*T) / D * [ -T*phi + i*v*T*phi ]
+
+So the modified integrand is:
+
+  Psi_rho(u) = exp(-r*T) / D(u) * (-T + i*v*T) * phi(v, T)
+
+Put adjustment (from put-call parity):
+  rho_put = rho_call - K*T*exp(-r*T)
+
+================================================================================
+PARAMETERS
+================================================================================
+  K           : float or array - Strike price(s)
+  T           : float - Time to expiry in years
+  option_type : str - 'call' or 'put'
+  N           : int - FFT grid size (default 4096)
+  alpha       : float - Carr-Madan dampening factor (default 1.5)
+  eta         : float - Frequency spacing (default 0.25)
+
+================================================================================
+RETURNS
+================================================================================
+  float or ndarray : Rho value(s) at the requested strike(s).
+
+================================================================================
+PSEUDOCODE
+================================================================================
+  FUNCTION rho(K, T, option_type, N, alpha, eta):
+      DEFINE modifier(u, v, phi, denom, T, alpha):
+          dphi_dr = i*v*T * phi
+          RETURN exp(-r*T) * (-T*phi + dphi_dr) / denom
+
+      k_grid, values = _greek_fft(T, modifier, N, alpha, eta)
+      result = interpolate K onto (k_grid, values)
+
+      IF option_type == 'put':
+          result = result - K*T*exp(-r*T)
+      RETURN result

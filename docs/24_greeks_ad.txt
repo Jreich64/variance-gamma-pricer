@@ -1,0 +1,51 @@
+Function: greeks_ad(self, K, T, option_type='call', N=4096, alpha=1.5, eta=0.25)
+Location: variance_gamma.py, VarianceGammaModel class
+Type: Public method (Autodiff Greeks)
+
+================================================================================
+PURPOSE
+================================================================================
+Computes all Greeks via PyTorch automatic differentiation. This provides an
+independent verification of the analytical Greeks and demonstrates that the
+two approaches (manual Fourier integrand differentiation vs backpropagation)
+yield identical results up to floating-point precision.
+
+================================================================================
+COMPUTATION STRATEGY
+================================================================================
+  1. Wrap all model parameters as torch.Tensor with requires_grad=True.
+  2. Call _torch_price_call to get a differentiable call price scalar.
+  3. Use torch.autograd.grad with create_graph=True to get first-order Greeks:
+       delta = dC/dS, rho = dC/dr, vega = dC/dsigma,
+       d_nu = dC/dnu, d_theta_param = dC/dtheta, theta = dC/dT
+  4. Use torch.autograd.grad on delta (which has a graph due to create_graph)
+     to get gamma = d(delta)/dS = d^2C/dS^2.
+  5. Apply put-call parity adjustments if option_type is 'put'.
+
+================================================================================
+PUT ADJUSTMENTS (applied post-autodiff)
+================================================================================
+  price_put = call_price - S*exp(-q*T) + K*exp(-r*T)
+  delta_put = delta_call - exp(-q*T)
+  theta_put = theta_call + q*S*exp(-q*T) - r*K*exp(-r*T)
+  rho_put   = rho_call - K*T*exp(-r*T)
+  gamma, vega, d_theta_param, d_nu: same for call and put
+
+================================================================================
+PARAMETERS
+================================================================================
+  K           : float - Strike price
+  T           : float - Time to expiry in years
+  option_type : str - 'call' or 'put'
+  N, alpha, eta : FFT configuration
+
+================================================================================
+RETURNS
+================================================================================
+  dict with keys: price, delta, gamma, theta, vega, rho, d_theta_param, d_nu
+  All values are Python floats (extracted via .item()).
+
+================================================================================
+REQUIRES
+================================================================================
+  PyTorch (import torch). Raises ImportError if not available.

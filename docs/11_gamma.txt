@@ -1,0 +1,84 @@
+================================================================================
+gamma(self, K, T, N=4096, alpha=1.5, eta=0.25)
+================================================================================
+
+PURPOSE
+-------
+Computes the option gamma (d^2C/dS^2) -- the second derivative of the
+option price with respect to the spot price S -- via the FFT framework.
+Gamma is identical for calls and puts, so no option_type parameter is needed.
+
+INPUTS
+------
+  K              : float or array - Strike price(s).
+  T              : float          - Time to expiry in years.
+  N, alpha, eta  : FFT parameters (defaults: 4096, 1.5, 0.25).
+
+OUTPUTS
+-------
+  float or ndarray - Gamma value(s).
+
+MATHEMATICS
+-----------
+DERIVATION OF THE GAMMA MODIFIER:
+
+Starting from delta_call, which has integrand proportional to:
+    (iu + alpha + 1) / S * Psi(u)
+
+Differentiate again with respect to S. The factor 1/S contributes, and
+d phi/dS = (iv/S)*phi gives another factor:
+
+    d^2 C/dS^2 = d/dS [(iu+alpha+1)/S * Psi]
+
+Since Psi contains phi, and d phi/dS = (iv/S)*phi:
+
+    d^2 Psi/dS^2 involves (iv/S)^2 * phi / denom
+    = (iu+alpha+1)(iu+alpha) / S^2 * Psi(u)
+
+The gamma modifier function is:
+
+    modifier(u) = (iu + alpha + 1)(iu + alpha) / S^2 * Psi(u)
+
+DERIVATION DETAIL:
+Let v = u - (alpha+1)i, so iv = iu + alpha + 1.
+
+    d phi/dS = (iv/S) * phi
+    d^2 phi/dS^2 = (iv/S)(-1/S)*phi + (iv/S)^2*phi
+                  ... but we need d^2 C/dS^2, not d^2 phi/dS^2.
+
+More carefully: C involves exp(-rT)*phi(v)/denom, and S appears only in phi
+through the ln(S) term. So:
+
+    dC/dS  ~ (1/S) * (iv) * [exp(-rT)*phi/denom]  (integrand level)
+    d^2C/dS^2 ~ (1/S^2) * (iv)(iv-1) * [exp(-rT)*phi/denom]
+
+But iv = iu + alpha + 1, so iv - 1 = iu + alpha. Hence:
+
+    modifier = (iu + alpha + 1)(iu + alpha) / S^2 * Psi(u)
+
+CALL-PUT EQUIVALENCE:
+From put-call parity: P = C - S*exp(-qT) + K*exp(-rT)
+    dP/dS = dC/dS - exp(-qT)
+    d^2P/dS^2 = d^2C/dS^2
+
+So gamma is the same for calls and puts.
+
+INTERPRETATION:
+  - Gamma measures the curvature of the option price w.r.t. spot.
+  - It indicates how quickly delta changes as S moves.
+  - Gamma is always positive for long options.
+  - Gamma is largest for at-the-money options near expiry.
+  - Under VG, gamma can differ from Black-Scholes gamma due to
+    heavier tails and skewness.
+
+PSEUDOCODE
+----------
+  def gamma(K, T):
+      def modifier(u, v, phi, denom, T, alpha):
+          psi = exp(-r*T) * phi / denom
+          a1 = i*u + alpha + 1
+          a0 = i*u + alpha
+          return a1 * a0 / S^2 * psi
+
+      k_grid, vals = _greek_fft(T, modifier, N, alpha, eta)
+      return _interp(K, k_grid, vals)

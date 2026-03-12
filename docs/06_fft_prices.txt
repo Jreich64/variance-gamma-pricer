@@ -1,0 +1,104 @@
+================================================================================
+_fft_prices(self, T, N=4096, alpha=1.5, eta=0.25) -> (ndarray, ndarray)
+================================================================================
+
+PURPOSE
+-------
+Executes the full Carr-Madan FFT pipeline to compute European call option
+prices across a grid of log-strikes in a single FFT operation. This is the
+core pricing engine: one FFT call produces prices for thousands of strikes
+simultaneously.
+
+INPUTS
+------
+  T     : float - Time to expiry in years.
+  N     : int   - Number of FFT points (default 4096, must be power of 2
+                   for FFT efficiency).
+  alpha : float - Dampening parameter for the Carr-Madan method (default 1.5).
+  eta   : float - Spacing in the Fourier frequency domain (default 0.25).
+
+OUTPUTS
+-------
+  (k, call_prices) : tuple of two ndarrays of shape (N,)
+    k           - Log-strike grid: k_j = -b + lambda * j, where j = 0,...,N-1.
+    call_prices - Corresponding European call option prices at each log-strike.
+
+MATHEMATICS
+-----------
+THE CARR-MADAN FFT METHOD:
+
+Starting from the Fourier inversion:
+
+    C(K) = (exp(-alpha*k) / pi) * integral_0^inf Re[exp(-iuk) * Psi(u)] du
+
+where k = ln(K), we discretize:
+
+  1) FREQUENCY GRID:
+     u_j = j * eta,   j = 0, 1, ..., N-1
+     where eta is the frequency spacing.
+
+  2) LOG-STRIKE GRID:
+     k_m = -b + lambda * m,   m = 0, 1, ..., N-1
+     where:
+       lambda = 2*pi / (N * eta)     [reciprocal relationship]
+       b = N * lambda / 2            [centering the grid]
+
+     The reciprocal relationship lambda * eta = 2*pi/N is fundamental to
+     the FFT -- it ensures the discrete integral maps exactly to an FFT.
+
+  3) DISCRETIZED INTEGRAL:
+     The call price at log-strike k_m is:
+
+     C(k_m) ~ (exp(-alpha*k_m) / pi) * sum_{j=0}^{N-1} exp(-i*u_j*k_m) * Psi(u_j) * eta * w_j
+
+     where w_j are Simpson quadrature weights.
+
+  4) RECOGNIZING THE FFT STRUCTURE:
+     Substituting k_m = -b + lambda*m and u_j = j*eta:
+
+     exp(-i*u_j*k_m) = exp(i*j*eta*b) * exp(-i*2*pi*j*m/N)
+
+     The second factor exp(-i*2*pi*j*m/N) is exactly the FFT kernel!
+
+     Therefore: define x_j = exp(i*b*u_j) * Psi(u_j) * eta * w_j
+
+     Then: FFT(x)_m = sum_{j=0}^{N-1} x_j * exp(-i*2*pi*j*m/N)
+
+     And: C(k_m) = (exp(-alpha*k_m) / pi) * Re[FFT(x)_m]
+
+  5) COMPUTATIONAL COST:
+     Without FFT: O(N^2) operations to evaluate N prices at N strikes.
+     With FFT:    O(N*log(N)) operations -- a massive speedup.
+     For N=4096: ~50,000 ops vs ~17,000,000 ops.
+
+GRID PARAMETERS AND THEIR EFFECTS:
+  - eta (frequency spacing): Smaller eta gives finer sampling of the
+    characteristic function but requires larger N to cover the same
+    frequency range. Default 0.25 is standard.
+  - N (grid size): More points improve accuracy and strike coverage.
+    Must be a power of 2 for FFT. 4096 is usually sufficient.
+  - lambda (log-strike spacing): Determined by eta and N via
+    lambda = 2*pi/(N*eta). Smaller lambda gives finer strike resolution.
+  - b (half-width): b = N*lambda/2 determines the range of log-strikes
+    covered: from -b to +b approximately.
+
+PSEUDOCODE
+----------
+  def _fft_prices(T, N, alpha, eta):
+      lambda = 2*pi / (N * eta)
+      b = N * lambda / 2
+
+      for j = 0 to N-1:
+          u[j] = j * eta
+
+      sw = simpson_weights(N)
+      psi = carr_madan_psi(u, T, alpha)
+
+      x = exp(i*b*u) * psi * eta * sw
+      fft_result = FFT(x)
+
+      for j = 0 to N-1:
+          k[j] = -b + lambda * j
+          call_prices[j] = Re(exp(-alpha*k[j]) / pi * fft_result[j])
+
+      return (k, call_prices)

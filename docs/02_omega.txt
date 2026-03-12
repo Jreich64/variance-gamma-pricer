@@ -1,0 +1,60 @@
+================================================================================
+omega(self) -> float
+================================================================================
+
+PURPOSE
+-------
+Computes the martingale correction term omega, which ensures the discounted
+asset price process is a martingale under the risk-neutral measure.
+
+INPUTS
+------
+  None (uses instance attributes self.sigma, self.nu, self.theta).
+
+OUTPUTS
+-------
+  float - The martingale correction omega.
+
+MATHEMATICS
+-----------
+Under the risk-neutral measure, the expected value of S(T) must satisfy:
+
+    E[S(T)] = S(0) * exp((r - q) * T)
+
+The VG log-price process is:
+
+    ln(S(T)) = ln(S(0)) + (r - q + omega)*T + theta*G(T) + sigma*W(G(T))
+
+For the martingale condition to hold, we need:
+
+    E[exp(theta*G(T) + sigma*W(G(T)))] = exp(-omega*T)
+
+Using the moment generating function of the VG process, we require:
+
+    exp(-omega*T) = [ 1 / (1 - theta*nu - sigma^2*nu/2) ]^(T/nu)
+
+Taking logarithms and solving for omega:
+
+    omega = (1/nu) * ln(1 - theta*nu - sigma^2*nu/2)
+
+DERIVATION OF THE MGF IDENTITY:
+Conditional on G(T) = g, the inner Brownian motion contributes:
+    E[exp(theta*g + sigma*W(g))] = exp(theta*g + sigma^2*g/2)
+
+Now take expectation over G(T) ~ Gamma(T/nu, nu):
+    E[exp((theta + sigma^2/2)*G(T))]
+    = [1 / (1 - (theta + sigma^2/2)*nu)]^(T/nu)
+
+This is finite (and the model is well-defined) only when:
+    1 - theta*nu - sigma^2*nu/2 > 0
+
+EXISTENCE CONDITION:
+If 1 - theta*nu - sigma^2*nu/2 <= 0, the logarithm is undefined and the
+VG model cannot be used with these parameters. The argument inside ln(.)
+must be strictly positive.
+
+PSEUDOCODE
+----------
+  def omega():
+      A = 1 - theta * nu - 0.5 * sigma^2 * nu
+      return (1 / nu) * ln(A)

@@ -1,0 +1,62 @@
+================================================================================
+_dphi_dT(self, v, T) -> complex or ndarray
+================================================================================
+
+PURPOSE
+-------
+Computes the partial derivative of the characteristic function phi(v; T)
+with respect to time-to-expiry T. This is used by theta_greek() to
+construct the theta integrand.
+
+INPUTS
+------
+  v : complex or ndarray - Fourier variable (typically v = u - (alpha+1)*i).
+  T : float              - Time to expiry in years.
+
+OUTPUTS
+-------
+  complex or ndarray - d phi(v; T) / dT.
+
+MATHEMATICS
+-----------
+Recall the characteristic function in log form:
+
+    ln phi(v; T) = i*v*[ln(S) + (r-q+omega)*T]
+                   - (T/nu)*ln(1 - i*v*theta*nu + 0.5*sigma^2*nu*v^2)
+
+Denote:
+    drift_coeff = i*v*(r - q + omega)
+    B = 1 - i*v*theta*nu + 0.5*sigma^2*nu*v^2
+    vg_coeff = -(1/nu)*ln(B)
+
+Then:
+    ln phi = i*v*ln(S) + drift_coeff * T + vg_coeff * T
+
+Differentiating with respect to T:
+
+    d(ln phi)/dT = drift_coeff + vg_coeff
+                 = i*v*(r - q + omega) - (1/nu)*ln(B)
+
+By the chain rule:
+
+    d phi/dT = [drift_coeff + vg_coeff] * phi(v; T)
+
+EXPLICIT FORMULA:
+
+    d phi/dT = { i*v*(r - q + omega)
+                 - (1/nu)*ln(1 - i*v*theta*nu + 0.5*sigma^2*nu*v^2) }
+               * phi(v; T)
+
+Note that B does not depend on T (it depends on v and the VG parameters),
+so the T-derivative of ln(phi) is simply the coefficient of T in the
+exponent.
+
+PSEUDOCODE
+----------
+  def _dphi_dT(v, T):
+      w = omega()
+      drift_part = i*v*(r - q + w)
+      B = 1 - i*v*theta*nu + 0.5*sigma^2*nu*v^2
+      vg_part = -(1/nu) * ln(B)
+      phi = characteristic_function(v, T)
+      return (drift_part + vg_part) * phi

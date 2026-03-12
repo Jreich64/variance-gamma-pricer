@@ -1,0 +1,79 @@
+================================================================================
+theta_greek(self, K, T, option_type="call", N=4096, alpha=1.5, eta=0.25)
+================================================================================
+
+PURPOSE
+-------
+Computes the option theta (dC/dT) -- the sensitivity of the option price to
+changes in time-to-expiry T. Note: this is the derivative with respect to
+time to expiry (positive = option gains value as T increases). The
+conventional "option theta" with respect to calendar time t is the negative.
+
+INPUTS
+------
+  K           : float or array - Strike price(s).
+  T           : float          - Time to expiry in years.
+  option_type : str            - "call" or "put".
+  N, alpha, eta : FFT parameters.
+
+OUTPUTS
+-------
+  float or ndarray - Theta value(s). Positive means the option price
+  increases as time-to-expiry increases (equivalently, the option loses
+  value as calendar time advances).
+
+MATHEMATICS
+-----------
+DERIVATION:
+
+The call price is:
+    C(K) = (exp(-alpha*k)/pi) * integral Re[exp(-iuk) * exp(-rT) * phi(v,T) / D(u)] du
+
+Differentiating with respect to T:
+
+    dC/dT = (exp(-alpha*k)/pi)
+            * integral Re[exp(-iuk) * d/dT{exp(-rT)*phi(v,T)/D(u)}] du
+
+Since D(u) does not depend on T:
+
+    d/dT[exp(-rT)*phi/D] = exp(-rT) * (-r*phi + d phi/dT) / D
+
+So the theta modifier is:
+
+    modifier(u) = exp(-rT) * (-r*phi + d phi/dT) / D(u)
+
+where d phi/dT is computed by _dphi_dT.
+
+EXACT FORMULA (CALL):
+    theta_call = (exp(-alpha*k)/pi)
+                 * integral Re[exp(-iuk) * exp(-rT) * (-r*phi + dphi/dT) / D(u)] du
+
+PUT THETA:
+From put-call parity P = C - S*exp(-qT) + K*exp(-rT):
+
+    dP/dT = dC/dT + q*S*exp(-qT) - r*K*exp(-rT)
+
+So: theta_put = theta_call + q*S*exp(-q*T) - r*K*exp(-r*T)
+
+INTERPRETATION:
+  - For most options, theta w.r.t. calendar time (= -theta_greek) is
+    negative: options lose value as time passes (time decay).
+  - Deep in-the-money puts can have positive calendar theta.
+  - Under VG, theta can differ from Black-Scholes because the VG process
+    has a different relationship between time and the distribution shape
+    (the gamma subordinator changes how "time" enters the model).
+
+PSEUDOCODE
+----------
+  def theta_greek(K, T, option_type):
+      def modifier(u, v, phi, denom, T, alpha):
+          dphi = _dphi_dT(v, T)
+          return exp(-r*T) * (-r*phi + dphi) / denom
+
+      k_grid, vals = _greek_fft(T, modifier, N, alpha, eta)
+      result = _interp(K, k_grid, vals)
+
+      if option_type == "put":
+          result = result + q*S*exp(-q*T) - r*K*exp(-r*T)
+
+      return result

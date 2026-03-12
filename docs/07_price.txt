@@ -1,0 +1,71 @@
+================================================================================
+price(self, K, T, option_type="call", N=4096, alpha=1.5, eta=0.25)
+================================================================================
+
+PURPOSE
+-------
+Prices a European call or put option at a specific strike K by running the
+FFT pipeline and interpolating the result on the log-strike grid.
+
+INPUTS
+------
+  K           : float or array - Strike price(s) (K > 0).
+  T           : float          - Time to expiry in years.
+  option_type : str            - "call" or "put".
+  N           : int            - Number of FFT points (default 4096).
+  alpha       : float          - Dampening parameter (default 1.5).
+  eta         : float          - Frequency spacing (default 0.25).
+
+OUTPUTS
+-------
+  float or ndarray - Option price(s). Returns a scalar if K is scalar,
+  an array if K is an array.
+
+MATHEMATICS
+-----------
+CALL PRICING:
+The FFT produces call prices on a grid of log-strikes. For an arbitrary
+strike K, we compute k = ln(K) and linearly interpolate on the FFT grid
+to obtain C(K).
+
+PUT PRICING VIA PUT-CALL PARITY:
+Rather than running a separate FFT for puts, the code uses put-call parity:
+
+    P(K, T) = C(K, T) - S * exp(-q*T) + K * exp(-r*T)
+
+This is exact (not an approximation) and avoids the numerical issues that
+can arise when trying to directly FFT-price puts. The put payoff
+max(K - S_T, 0) would require a different dampening approach (alpha < 0),
+which can be less stable. Put-call parity is the standard approach.
+
+PUT-CALL PARITY DERIVATION:
+Under the risk-neutral measure:
+    C - P = exp(-rT) * E[S_T - K]
+          = S * exp(-qT) - K * exp(-rT)
+
+Therefore:
+    P = C - S * exp(-qT) + K * exp(-rT)
+
+INTERPOLATION:
+The FFT grid has spacing lambda = 2*pi/(N*eta) in log-strike space.
+For the default parameters (N=4096, eta=0.25), lambda ~ 0.00613,
+giving very fine resolution. Linear interpolation (np.interp) on this
+fine grid introduces negligible error.
+
+The strike must fall within the range [exp(-b), exp(b)] where
+b = N*lambda/2. For default parameters, b ~ 12.57, so the grid covers
+strikes from about S*exp(-12.57) to S*exp(12.57), which is an
+extremely wide range.
+
+PSEUDOCODE
+----------
+  def price(K, T, option_type):
+      K = ensure_array(K)
+      k_grid, call_prices = _fft_prices(T, N, alpha, eta)
+      log_K = ln(K)
+      prices = linear_interpolate(log_K, k_grid, call_prices)
+
+      if option_type == "put":
+          prices = prices - S*exp(-q*T) + K*exp(-r*T)
+
+      return scalar_if_single(prices)

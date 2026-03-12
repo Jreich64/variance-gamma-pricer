@@ -1,0 +1,53 @@
+Function: _dphi_dnu(self, v, T)
+Location: variance_gamma.py, VarianceGammaModel class
+Type: Private helper method
+
+================================================================================
+PURPOSE
+================================================================================
+Computes the partial derivative of the characteristic function phi(v, T) with
+respect to the VG variance-rate parameter nu. This is used to compute the
+sensitivity of option prices to changes in the kurtosis-controlling parameter.
+
+================================================================================
+MATHEMATICAL DERIVATION
+================================================================================
+nu appears in omega (both as 1/nu multiplier and inside the log argument) and
+in the VG exponent (as T/nu and inside B):
+
+  1. Martingale correction:
+       A = 1 - theta*nu - 0.5*sigma^2*nu
+       d(omega)/d(nu) = -(1/nu^2)*ln(A) + (1/nu)*(-theta - 0.5*sigma^2)/A
+
+  2. VG exponent:
+       B = 1 - i*v*theta*nu + 0.5*sigma^2*nu*v^2
+       dB/d(nu) = -i*v*theta + 0.5*sigma^2*v^2
+       d/d(nu)[ -(T/nu)*ln(B) ] = (T/nu^2)*ln(B) - (T/nu)*dB/B
+
+Full derivative:
+  d(phi)/d(nu) = [ i*v*d(omega)/d(nu)*T + (T/nu^2)*ln(B) - (T/nu)*dB/B ] * phi
+
+================================================================================
+PARAMETERS
+================================================================================
+  v : ndarray (complex) - Shifted frequency variable
+  T : float - Time to expiry in years
+
+================================================================================
+RETURNS
+================================================================================
+  ndarray (complex) : d(phi)/d(nu) evaluated at each v.
+
+================================================================================
+PSEUDOCODE
+================================================================================
+  FUNCTION _dphi_dnu(v, T):
+      A = 1 - theta*nu - 0.5*sigma^2*nu
+      domega = -(1/nu^2)*ln(A) + (1/nu)*(-theta - 0.5*sigma^2)/A
+
+      B = 1 - i*v*theta*nu + 0.5*sigma^2*nu*v^2
+      dB = -i*v*theta + 0.5*sigma^2*v^2
+      dvg = (T/nu^2)*ln(B) - (T/nu)*dB/B
+
+      phi = characteristic_function(v, T)
+      RETURN (i*v*domega*T + dvg) * phi

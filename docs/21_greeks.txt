@@ -1,0 +1,46 @@
+Function: greeks(self, K, T, option_type='call', **fft_kw)
+Location: variance_gamma.py, VarianceGammaModel class
+Type: Public convenience method
+
+================================================================================
+PURPOSE
+================================================================================
+Computes ALL analytical Greeks for a given strike, expiry, and option type in a
+single call. Returns a dictionary containing the option price and all seven
+sensitivity measures.
+
+================================================================================
+RETURNED DICTIONARY KEYS
+================================================================================
+  "price"         : Option price (call or put)
+  "delta"         : dC/dS (first-order spot sensitivity)
+  "gamma"         : d^2C/dS^2 (second-order spot sensitivity)
+  "theta"         : dC/dT (time-to-expiry sensitivity)
+  "vega"          : dC/d(sigma) (volatility sensitivity)
+  "rho"           : dC/dr (interest rate sensitivity)
+  "d_theta_param" : dC/d(theta_VG) (VG skew sensitivity)
+  "d_nu"          : dC/d(nu) (VG kurtosis sensitivity)
+
+================================================================================
+PARAMETERS
+================================================================================
+  K           : float or array - Strike price(s)
+  T           : float - Time to expiry in years
+  option_type : str - 'call' or 'put'
+  **fft_kw    : Additional keyword arguments passed to each Greek function
+                (N, alpha, eta)
+
+================================================================================
+PSEUDOCODE
+================================================================================
+  FUNCTION greeks(K, T, option_type):
+      RETURN {
+          "price":         price(K, T, option_type),
+          "delta":         delta(K, T, option_type),
+          "gamma":         gamma(K, T),
+          "theta":         theta_greek(K, T, option_type),
+          "vega":          vega(K, T, option_type),
+          "rho":           rho(K, T, option_type),
+          "d_theta_param": sensitivity_theta_param(K, T, option_type),
+          "d_nu":          sensitivity_nu(K, T, option_type),
+      }

@@ -1,0 +1,36 @@
+Function: sensitivity_theta_param(self, K, T, option_type='call', N=4096, alpha=1.5, eta=0.25)
+Location: variance_gamma.py, VarianceGammaModel class
+Type: Public method (VG-specific sensitivity)
+
+================================================================================
+PURPOSE
+================================================================================
+Computes dC/d(theta_VG), the sensitivity of the option price to the VG skew
+parameter theta. This is a model-specific Greek (not a standard Black-Scholes
+Greek) that quantifies how the option price changes when the skewness of the
+return distribution shifts.
+
+================================================================================
+MATHEMATICAL FORMULA
+================================================================================
+The modified Carr-Madan integrand:
+
+  Psi_dtheta(u) = exp(-r*T) / D(u) * d(phi)/d(theta)(v, T)
+
+where d(phi)/d(theta) is computed by _dphi_dtheta.
+
+This sensitivity is identical for calls and puts because the put-call parity
+adjustment terms (S*exp(-qT) and K*exp(-rT)) do not depend on theta.
+
+================================================================================
+PARAMETERS
+================================================================================
+  K           : float or array - Strike price(s)
+  T           : float - Time to expiry in years
+  option_type : str - 'call' or 'put' (result is identical)
+  N, alpha, eta : FFT configuration parameters
+
+================================================================================
+RETURNS
+================================================================================
+  float or ndarray : dC/d(theta_VG) at the requested strike(s).

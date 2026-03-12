@@ -1,0 +1,57 @@
+Function: _torch_price_call(S, r, q, sigma, nu, theta_vg, K_val, T_val, N=4096, alpha=1.5, eta=0.25) [static]
+Location: variance_gamma.py, VarianceGammaModel class
+Type: Private static method (PyTorch autodiff pipeline)
+
+================================================================================
+PURPOSE
+================================================================================
+Implements the complete Carr-Madan FFT call pricing algorithm using only
+PyTorch tensor operations. Every intermediate computation is built on
+differentiable torch ops, so the returned call price scalar supports
+torch.autograd.grad for computing exact Greeks via backpropagation.
+
+This is the PyTorch mirror of _fft_prices + price, but expressed in a single
+function that takes differentiable scalar tensors as inputs.
+
+================================================================================
+KEY DESIGN DECISIONS
+================================================================================
+1. Complex arithmetic: Uses torch.complex() to build complex tensors from
+   real/imaginary parts, enabling gradient flow through complex operations.
+
+2. FFT: Uses torch.fft.fft which supports autograd.
+
+3. Interpolation: Uses torch.searchsorted + manual linear interpolation
+   (rather than np.interp) to stay within the PyTorch computation graph.
+
+4. All parameters (S, r, q, sigma, nu, theta_vg, T_val) may have
+   requires_grad=True. K_val does not need gradients.
+
+================================================================================
+COMPUTATION STEPS
+================================================================================
+  1. Set up FFT grid parameters (lambda, b, u_j)
+  2. Build Simpson weights (constant, no grad)
+  3. Construct shifted frequency v = u - (alpha+1)*i as complex tensor
+  4. Compute omega (martingale correction) from sigma, nu, theta_vg
+  5. Compute characteristic function phi(v, T) using torch.log, torch.exp
+  6. Build Carr-Madan denominator D(u)
+  7. Form Psi = exp(-r*T) * phi / D
+  8. Apply FFT shift: x_j = exp(i*b*u_j) * Psi_j * eta * w_j
+  9. Compute FFT via torch.fft.fft
+  10. Recover call prices: C(k_m) = exp(-alpha*k_m)/pi * Re(FFT_m)
+  11. Interpolate to log(K) using searchsorted + linear interpolation
+
+================================================================================
+PARAMETERS
+================================================================================
+  S, r, q, sigma, nu, theta_vg : torch.Tensor (scalar, float64)
+      Model parameters, potentially with requires_grad=True.
+  K_val : torch.Tensor (scalar, float64) - Strike price (no grad needed)
+  T_val : torch.Tensor (scalar, float64) - Time to expiry (may have grad)
+  N, alpha, eta : FFT configuration (Python scalars)
+
+================================================================================
+RETURNS
+================================================================================
+  torch.Tensor (scalar) : The European call price, supporting autograd.

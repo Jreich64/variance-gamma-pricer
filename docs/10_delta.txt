@@ -1,0 +1,77 @@
+================================================================================
+delta(self, K, T, option_type="call", N=4096, alpha=1.5, eta=0.25)
+================================================================================
+
+PURPOSE
+-------
+Computes the option delta (dC/dS or dP/dS) -- the first derivative of the
+option price with respect to the spot price S -- via the FFT framework.
+
+INPUTS
+------
+  K           : float or array - Strike price(s).
+  T           : float          - Time to expiry in years.
+  option_type : str            - "call" or "put".
+  N, alpha, eta : FFT parameters (defaults: 4096, 1.5, 0.25).
+
+OUTPUTS
+-------
+  float or ndarray - Delta value(s).
+
+MATHEMATICS
+-----------
+DERIVATION OF THE DELTA MODIFIER:
+
+The call price in the Carr-Madan framework is:
+
+    C(K) = (exp(-alpha*k)/pi) * integral Re[exp(-iuk) * Psi(u)] du
+
+where Psi(u) = exp(-rT) * phi(u-(alpha+1)i) / D(u) and D(u) is the
+denominator alpha^2 + alpha - u^2 + i(2alpha+1)u.
+
+To find dC/dS, note that S appears only inside phi through the term
+exp(i*v*ln(S)). Differentiating:
+
+    d phi/dS = (iv/S) * phi = (i(u-(alpha+1)i)/S) * phi
+             = (iu + alpha + 1) / S * phi
+
+Therefore:
+
+    d Psi/dS = (iu + alpha + 1) / S * Psi(u)
+
+The delta modifier function is:
+
+    modifier(u) = (iu + alpha + 1) / S * Psi(u)
+
+EXACT FORMULA:
+    delta_call = (1/S) * (exp(-alpha*k)/pi)
+                 * integral Re[exp(-iuk) * (iu+alpha+1) * Psi(u)] du
+
+PUT DELTA:
+Using put-call parity P = C - S*exp(-qT) + K*exp(-rT):
+
+    dP/dS = dC/dS - exp(-qT)
+
+So: delta_put = delta_call - exp(-q*T)
+
+INTERPRETATION:
+  - Call delta is in (0, 1): represents the hedge ratio -- how many shares
+    of stock to hold to hedge one short call.
+  - Put delta is in (-1, 0): delta_put = delta_call - exp(-qT).
+  - At-the-money: delta_call ~ 0.5 * exp(-qT) for symmetric distributions,
+    but the VG skew (theta) shifts this.
+
+PSEUDOCODE
+----------
+  def delta(K, T, option_type):
+      def modifier(u, v, phi, denom, T, alpha):
+          psi = exp(-r*T) * phi / denom
+          return (i*u + alpha + 1) / S * psi
+
+      k_grid, vals = _greek_fft(T, modifier, N, alpha, eta)
+      result = _interp(K, k_grid, vals)
+
+      if option_type == "put":
+          result = result - exp(-q*T)
+
+      return result

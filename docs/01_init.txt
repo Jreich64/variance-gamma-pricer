@@ -1,0 +1,60 @@
+================================================================================
+__init__(self, S, r, q, sigma, nu, theta)
+================================================================================
+
+PURPOSE
+-------
+Constructor for the VarianceGammaModel class. Stores the six parameters that
+fully specify a Variance Gamma option pricing model under the risk-neutral
+measure.
+
+INPUTS
+------
+  S     : float  - Current spot price of the underlying asset (S > 0).
+  r     : float  - Continuously compounded risk-free interest rate (annualized).
+  q     : float  - Continuous dividend yield (annualized).
+  sigma : float  - Volatility of the Brownian motion component (sigma > 0).
+                   Controls the overall level of return variance.
+  nu    : float  - Variance rate of the gamma subordinator (nu > 0).
+                   Controls excess kurtosis (fat tails). Larger nu means
+                   heavier tails.
+  theta : float  - Drift of the Brownian motion component. Controls skewness
+                   of the return distribution. theta < 0 produces negative
+                   skew (heavier left tail), theta > 0 produces positive skew.
+
+OUTPUTS
+-------
+  None (initializes instance attributes self.S, self.r, self.q, self.sigma,
+  self.nu, self.theta).
+
+MATHEMATICS
+-----------
+The Variance Gamma (VG) process, introduced by Madan, Carr, and Chang (1998),
+models the log-price of an asset as:
+
+    X(t) = ln(S(t)) = ln(S(0)) + (r - q + omega)*t + theta*G(t) + sigma*W(G(t))
+
+where:
+  - W(.) is a standard Brownian motion,
+  - G(t) is a gamma process with unit mean rate and variance rate nu,
+    i.e., G(t) ~ Gamma(t/nu, nu),
+  - theta is the drift of the Brownian motion evaluated at gamma time,
+  - sigma is the volatility of the Brownian motion evaluated at gamma time,
+  - omega is a martingale correction ensuring E[S(t)] = S(0)*exp((r-q)*t).
+
+The VG process can be understood as Brownian motion with drift, time-changed
+by a gamma process. The gamma subordinator introduces randomness into the
+passage of "business time," producing:
+  - Heavier tails than the normal distribution (controlled by nu),
+  - Skewness in returns (controlled by theta),
+  - A pure-jump process with finite activity and infinite variation.
+
+The existence condition for the martingale measure requires:
+    1 - theta*nu - sigma^2*nu/2 > 0
+
+This ensures the omega (martingale correction) is well-defined.
+
+PSEUDOCODE
+----------
+  def __init__(S, r, q, sigma, nu, theta):
+      store S, r, q, sigma, nu, theta as instance attributes

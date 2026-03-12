@@ -1,0 +1,41 @@
+================================================================================
+_interp(self, K, k_grid, values) -> float or ndarray
+================================================================================
+
+PURPOSE
+-------
+Performs linear interpolation on the log-strike grid to extract the value
+(price or Greek) at a specific strike K. This is a utility used by price()
+and all Greek methods after the FFT produces values on a discrete grid.
+
+INPUTS
+------
+  K      : float or array - Strike price(s) to interpolate at (K > 0).
+  k_grid : ndarray        - Log-strike grid from the FFT (shape (N,)).
+  values : ndarray        - Computed values (prices or Greeks) on k_grid.
+
+OUTPUTS
+-------
+  float or ndarray - Interpolated value(s). Returns scalar if K is scalar.
+
+MATHEMATICS
+-----------
+The FFT produces values at discrete log-strikes k_j = -b + lambda*j.
+For a specific strike K, we need the value at k = ln(K), which generally
+falls between two grid points.
+
+Linear interpolation finds k_j <= ln(K) < k_{j+1} and computes:
+
+    value(K) = values[j] + (ln(K) - k_j) / (k_{j+1} - k_j) * (values[j+1] - values[j])
+
+This is a first-order approximation. Given that the FFT grid typically has
+4096 points spanning a very wide range of strikes, the grid spacing lambda
+is small enough (~0.006 for default parameters) that linear interpolation
+error is negligible compared to other sources of discretization error.
+
+PSEUDOCODE
+----------
+  def _interp(K, k_grid, values):
+      K = ensure_array(K)
+      result = linear_interpolate(ln(K), k_grid, values)
+      return scalar_if_single(result)

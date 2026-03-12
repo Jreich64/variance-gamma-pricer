@@ -1,0 +1,53 @@
+Function: vega(self, K, T, option_type='call', N=4096, alpha=1.5, eta=0.25)
+Location: variance_gamma.py, VarianceGammaModel class
+Type: Public method (Analytical Greek)
+
+================================================================================
+PURPOSE
+================================================================================
+Computes the analytical vega, dC/d(sigma), via the Carr-Madan FFT framework.
+Vega measures the sensitivity of the option price to changes in the Brownian
+motion volatility parameter sigma. It is identical for calls and puts since the
+put-call parity adjustment terms do not depend on sigma.
+
+================================================================================
+MATHEMATICAL FORMULA
+================================================================================
+The modified Carr-Madan integrand for vega is:
+
+  Psi_vega(u) = exp(-r*T) / D(u) * d(phi)/d(sigma)(v, T)
+
+where:
+  v = u - (alpha+1)*i
+  D(u) = alpha^2 + alpha - u^2 + i*(2*alpha+1)*u
+  d(phi)/d(sigma) is computed by _dphi_dsigma
+
+The vega is then recovered by the standard FFT inversion:
+
+  Vega(k_m) = exp(-alpha*k_m) / pi * Re(FFT(x)_m)
+
+================================================================================
+PARAMETERS
+================================================================================
+  K           : float or array - Strike price(s)
+  T           : float - Time to expiry in years
+  option_type : str - 'call' or 'put' (result is identical for both)
+  N           : int - FFT grid size (default 4096)
+  alpha       : float - Carr-Madan dampening factor (default 1.5)
+  eta         : float - Frequency spacing (default 0.25)
+
+================================================================================
+RETURNS
+================================================================================
+  float or ndarray : Vega value(s) at the requested strike(s).
+
+================================================================================
+PSEUDOCODE
+================================================================================
+  FUNCTION vega(K, T, option_type, N, alpha, eta):
+      DEFINE modifier(u, v, phi, denom, T, alpha):
+          dphi = _dphi_dsigma(v, T)
+          RETURN exp(-r*T) * dphi / denom
+
+      k_grid, values = _greek_fft(T, modifier, N, alpha, eta)
+      RETURN interpolate K onto (k_grid, values)

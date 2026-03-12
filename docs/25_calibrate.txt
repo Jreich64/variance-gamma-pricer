@@ -1,0 +1,78 @@
+Function: calibrate(S, r, q, K_market, T_market, prices_market, option_types, ...) [static]
+Location: variance_gamma.py, VarianceGammaModel class
+Type: Public static method
+
+================================================================================
+PURPOSE
+================================================================================
+Calibrates the three VG parameters (sigma, nu, theta) to a set of observed
+market option prices by minimizing the weighted sum of squared pricing errors.
+
+================================================================================
+OBJECTIVE FUNCTION
+================================================================================
+  minimize  SUM_i  w_i * ( V_model(K_i, T_i; sigma, nu, theta) - V_market_i )^2
+
+subject to the martingale condition: 1 - theta*nu - 0.5*sigma^2*nu > 0.
+Violations return a penalty of 1e12.
+
+================================================================================
+OPTIMIZATION STRATEGY
+================================================================================
+Two-phase approach:
+
+  Phase 1 (optional, enabled by use_global=True):
+    scipy.optimize.differential_evolution
+    - Population-based stochastic global optimizer
+    - Seed=42 for reproducibility, max 200 iterations, tol=1e-10
+    - Effective at escaping local minima in the non-convex landscape
+
+  Phase 2 (always):
+    scipy.optimize.minimize with method='L-BFGS-B'
+    - Gradient-based local optimizer with box constraints
+    - Starts from Phase 1 solution (or user-supplied x0)
+    - Max 500 iterations, ftol=1e-14
+
+================================================================================
+PARAMETERS
+================================================================================
+  S             : float - Spot price
+  r             : float - Risk-free rate
+  q             : float - Dividend yield
+  K_market      : array - Observed strikes
+  T_market      : array - Observed expiries (one per option)
+  prices_market : array - Observed market prices
+  option_types  : list[str] - 'call' or 'put' per option
+  x0            : list[float] - Initial guess [sigma, nu, theta]
+                  Default: [0.2, 0.5, -0.1]
+  bounds        : list[tuple] - Parameter bounds
+                  Default: [(0.01, 2.0), (0.001, 5.0), (-1.0, 1.0)]
+  weights       : array - Per-option weights (default: equal weights)
+  use_global    : bool - Enable differential evolution (default: False)
+
+================================================================================
+RETURNS
+================================================================================
+  (calibrated_model, result) : tuple
+    calibrated_model : VarianceGammaModel with optimized parameters
+    result : scipy.optimize.OptimizeResult with .x, .fun, .success, etc.
+
+================================================================================
+PSEUDOCODE
+================================================================================
+  FUNCTION calibrate(S, r, q, K_market, T_market, prices_market, types):
+      DEFINE objective(sigma, nu, theta):
+          IF martingale_condition_violated:
+              RETURN 1e12
+          model = VarianceGammaModel(S, r, q, sigma, nu, theta)
+          error = 0
+          FOR each market option i:
+              model_price = model.price(K_i, T_i, type_i)
+              error += weight_i * (model_price - market_price_i)^2
+          RETURN error
+
+      IF use_global:
+          x0 = differential_evolution(objective, bounds).x
+
+      result = L-BFGS-B minimize(objective, x0, bounds)
+      RETURN VarianceGammaModel(S, r, q, *result.x), result

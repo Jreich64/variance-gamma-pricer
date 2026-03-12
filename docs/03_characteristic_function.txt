@@ -1,0 +1,94 @@
+================================================================================
+characteristic_function(self, u, T) -> complex or ndarray
+================================================================================
+
+PURPOSE
+-------
+Evaluates the characteristic function of ln(S(T)) under the risk-neutral
+measure. The characteristic function is the Fourier transform of the
+probability density and is the central building block for FFT-based pricing.
+
+INPUTS
+------
+  u : float or ndarray  - Fourier variable(s). May be complex-valued when
+                           called from Carr-Madan with shifted argument.
+  T : float             - Time to expiry in years.
+
+OUTPUTS
+-------
+  complex or ndarray of complex - phi(u; T), the characteristic function
+  evaluated at each u.
+
+MATHEMATICS
+-----------
+THE VG PROCESS AS TIME-CHANGED BROWNIAN MOTION:
+
+The Variance Gamma process X_VG(t) is defined as a Brownian motion with
+drift, evaluated at a random gamma time:
+
+    X_VG(t) = theta * G(t) + sigma * W(G(t))
+
+where:
+  - W(.) is a standard Brownian motion,
+  - G(t) is a gamma process: G(t) ~ Gamma(shape=t/nu, scale=nu),
+    meaning E[G(t)] = t and Var[G(t)] = nu*t.
+
+The gamma subordinator G(t) models "business time" or "activity time."
+On days with more information flow, more business time elapses, leading
+to larger price moves. This naturally produces:
+  - Heavier tails (nu > 0 increases kurtosis beyond the normal),
+  - Skewness (theta != 0 tilts the distribution).
+
+CHARACTERISTIC FUNCTION DERIVATION:
+
+The log-price at time T is:
+    ln(S(T)) = ln(S(0)) + (r - q + omega)*T + theta*G(T) + sigma*W(G(T))
+
+The characteristic function phi(u) = E[exp(i*u*ln(S(T)))] factors into:
+
+  1) DETERMINISTIC DRIFT PART:
+     exp(i*u * [ln(S) + (r - q + omega)*T])
+
+  2) VG RANDOM PART (conditional tower):
+     E[exp(i*u * (theta*G(T) + sigma*W(G(T))))]
+
+For the VG part, condition on G(T) = g:
+    E[exp(i*u*(theta*g + sigma*W(g)))] = exp(i*u*theta*g - sigma^2*u^2*g/2)
+
+Now take expectation over G(T) ~ Gamma(T/nu, nu):
+    E[exp((i*u*theta - sigma^2*u^2/2) * G(T))]
+    = [1 / (1 - (i*u*theta - sigma^2*u^2/2)*nu)]^(T/nu)
+    = [1 / (1 - i*u*theta*nu + sigma^2*nu*u^2/2)]^(T/nu)
+
+This uses the MGF of the gamma distribution:
+    E[exp(z*G)] = (1 - z*nu)^(-T/nu)   for z*nu < 1.
+
+COMPLETE FORMULA:
+
+  phi(u; T) = exp(i*u*[ln(S) + (r-q+omega)*T])
+              * [1 / (1 - i*u*theta*nu + sigma^2*nu*u^2/2)]^(T/nu)
+
+Equivalently, writing with logarithms for numerical stability:
+
+  phi(u; T) = exp{ i*u*[ln(S) + (r-q+omega)*T]
+                   - (T/nu)*ln(1 - i*u*theta*nu + sigma^2*nu*u^2/2) }
+
+SPECIAL CASES:
+  - nu -> 0: VG reduces to geometric Brownian motion (Black-Scholes).
+  - theta = 0: Symmetric VG process (no skewness, still has excess kurtosis).
+  - sigma -> 0, theta != 0: Degenerate case (pure drift on gamma time).
+
+IMPLEMENTATION NOTE:
+The code computes drift and vg_exp separately using complex arithmetic,
+then combines them via exp(drift + vg_exp). This avoids numerical overflow
+for large u by keeping everything in the log domain until the final exp.
+
+PSEUDOCODE
+----------
+  def characteristic_function(u, T):
+      x = ln(S)
+      w = omega()
+      drift = i*u * (x + (r - q + w) * T)
+      inner = 1 - i*u*theta*nu + 0.5*sigma^2*nu*u^2
+      vg_exp = -(T/nu) * ln(inner)
+      return exp(drift + vg_exp)

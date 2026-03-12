@@ -1,0 +1,60 @@
+Function: _dphi_dsigma(self, v, T)
+Location: variance_gamma.py, VarianceGammaModel class
+Type: Private helper method
+
+================================================================================
+PURPOSE
+================================================================================
+Computes the partial derivative of the characteristic function phi(v, T) with
+respect to the VG volatility parameter sigma. This derivative is the key
+building block for the analytical vega Greek.
+
+================================================================================
+MATHEMATICAL DERIVATION
+================================================================================
+The characteristic function phi(v, T) depends on sigma in two places:
+
+  1. The martingale correction omega:
+       omega = (1/nu) * ln(A)    where  A = 1 - theta*nu - 0.5*sigma^2*nu
+
+       d(omega)/d(sigma) = (1/nu) * (-sigma*nu) / A = -sigma / A
+
+  2. The VG characteristic exponent:
+       vg_exp = -(T/nu) * ln(B)  where  B = 1 - i*v*theta*nu + 0.5*sigma^2*nu*v^2
+
+       d(vg_exp)/d(sigma) = -(T/nu) * (sigma*nu*v^2) / B
+
+The full derivative combines both via the chain rule:
+
+  d(phi)/d(sigma) = [ i*v * d(omega)/d(sigma) * T  +  d(vg_exp)/d(sigma) ] * phi(v, T)
+
+Substituting:
+
+  d(phi)/d(sigma) = [ i*v*T*(-sigma/A)  -  T*sigma*v^2 / B ] * phi(v, T)
+
+================================================================================
+PARAMETERS
+================================================================================
+  v : ndarray (complex)
+      Frequency-domain variable, typically the Carr-Madan shifted frequency
+      v = u - (alpha+1)*i.
+  T : float
+      Time to expiry in years.
+
+================================================================================
+RETURNS
+================================================================================
+  ndarray (complex) : d(phi)/d(sigma) evaluated at each point in v.
+
+================================================================================
+PSEUDOCODE
+================================================================================
+  FUNCTION _dphi_dsigma(v, T):
+      A = 1 - theta*nu - 0.5*sigma^2*nu
+      domega = -sigma / A
+
+      B = 1 - i*v*theta*nu + 0.5*sigma^2*nu*v^2
+      dvg = -(T/nu) * (sigma*nu*v^2) / B
+
+      phi = characteristic_function(v, T)
+      RETURN (i*v*domega*T + dvg) * phi

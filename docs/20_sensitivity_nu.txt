@@ -1,0 +1,34 @@
+Function: sensitivity_nu(self, K, T, option_type='call', N=4096, alpha=1.5, eta=0.25)
+Location: variance_gamma.py, VarianceGammaModel class
+Type: Public method (VG-specific sensitivity)
+
+================================================================================
+PURPOSE
+================================================================================
+Computes dC/d(nu), the sensitivity of the option price to the VG variance-rate
+parameter nu. This quantifies how the option price changes when the kurtosis
+(tail heaviness) of the return distribution changes.
+
+================================================================================
+MATHEMATICAL FORMULA
+================================================================================
+The modified Carr-Madan integrand:
+
+  Psi_dnu(u) = exp(-r*T) / D(u) * d(phi)/d(nu)(v, T)
+
+where d(phi)/d(nu) is computed by _dphi_dnu.
+
+This sensitivity is identical for calls and puts.
+
+================================================================================
+PARAMETERS
+================================================================================
+  K           : float or array - Strike price(s)
+  T           : float - Time to expiry in years
+  option_type : str - 'call' or 'put' (result is identical)
+  N, alpha, eta : FFT configuration parameters
+
+================================================================================
+RETURNS
+================================================================================
+  float or ndarray : dC/d(nu) at the requested strike(s).

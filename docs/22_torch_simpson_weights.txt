@@ -1,0 +1,35 @@
+Function: _torch_simpson_weights(N) [static method]
+Location: variance_gamma.py, VarianceGammaModel class
+Type: Private static helper (PyTorch autodiff pipeline)
+
+================================================================================
+PURPOSE
+================================================================================
+Generates Simpson's rule quadrature weights as a PyTorch tensor (float64).
+This is the PyTorch equivalent of _simpson_weights, used in the differentiable
+pricing pipeline so that the entire FFT computation can be backpropagated
+through by torch.autograd.
+
+================================================================================
+WEIGHT PATTERN
+================================================================================
+  w[0]      = 1/3
+  w[odd]    = 4/3
+  w[even>0] = 2/3
+  w[N-1]    = 1/3  (if N is even, overrides the last weight)
+
+================================================================================
+PARAMETERS
+================================================================================
+  N : int - Number of quadrature points (same as FFT grid size)
+
+================================================================================
+RETURNS
+================================================================================
+  torch.Tensor (float64, shape (N,)) : Simpson weights.
+
+================================================================================
+NOTE
+================================================================================
+These weights are treated as constants (no requires_grad). They do not need
+gradient tracking since they are fixed numerical integration coefficients.

@@ -1,0 +1,87 @@
+================================================================================
+_greek_fft(self, T, modifier_fn, N, alpha, eta) -> (ndarray, ndarray)
+================================================================================
+
+PURPOSE
+-------
+Generic FFT engine for computing option Greeks. It runs the same FFT pipeline
+as _fft_prices but applies a user-supplied modifier function to the integrand
+before performing the FFT. Each Greek corresponds to a specific modifier
+derived from differentiating the Carr-Madan integral with respect to the
+relevant parameter.
+
+INPUTS
+------
+  T           : float    - Time to expiry in years.
+  modifier_fn : callable - A function with signature:
+                           modifier_fn(u, v, phi, denom, T, alpha) -> ndarray
+                           where:
+                             u     = real frequency grid (N,)
+                             v     = shifted frequency u - (alpha+1)*i
+                             phi   = characteristic_function(v, T)
+                             denom = alpha^2 + alpha - u^2 + i*(2*alpha+1)*u
+                             T     = time to expiry
+                             alpha = dampening parameter
+                           Returns the modified integrand array of shape (N,).
+  N           : int      - Number of FFT points.
+  alpha       : float    - Dampening parameter.
+  eta         : float    - Frequency spacing.
+
+OUTPUTS
+-------
+  (k_grid, values) : tuple of two ndarrays of shape (N,)
+    k_grid - Log-strike grid (same as in _fft_prices).
+    values - The computed Greek values on the log-strike grid.
+
+MATHEMATICS
+-----------
+GENERAL FRAMEWORK:
+Every Greek can be expressed as a Fourier integral of the form:
+
+    G(k) = (exp(-alpha*k) / pi) * integral_0^inf Re[exp(-iuk) * M(u)] du
+
+where M(u) is a "modified integrand" that depends on which Greek we are
+computing. The modification comes from differentiating the Carr-Madan
+pricing integral with respect to the parameter of interest.
+
+For example:
+  - For the price itself: M(u) = Psi(u)  [no modification]
+  - For delta: differentiate C(K) w.r.t. S, which modifies the integrand
+  - For vega: differentiate w.r.t. sigma, which modifies phi inside Psi
+
+The key insight is that differentiation under the integral sign is valid
+here (the integrand is smooth and decays sufficiently fast), so:
+
+    dC/d(param) = (exp(-alpha*k)/pi) * integral Re[exp(-iuk) * d Psi/d(param)] du
+
+Each derivative d Psi/d(param) can be computed analytically, yielding a
+modified integrand. The same FFT machinery then evaluates the integral.
+
+WHY THIS DESIGN:
+By factoring out the FFT infrastructure into _greek_fft and passing the
+modification as a callable, the code avoids duplicating the FFT setup
+(grid construction, Simpson weights, FFT call, post-processing) for each
+Greek. This is both cleaner and less error-prone.
+
+PSEUDOCODE
+----------
+  def _greek_fft(T, modifier_fn, N, alpha, eta):
+      lambda = 2*pi / (N * eta)
+      b = N * lambda / 2
+
+      u = [0, eta, 2*eta, ..., (N-1)*eta]
+      v = u - (alpha + 1)*i
+
+      sw = simpson_weights(N)
+      phi = characteristic_function(v, T)
+      denom = alpha^2 + alpha - u^2 + i*(2*alpha+1)*u
+
+      modified = modifier_fn(u, v, phi, denom, T, alpha)
+
+      x = exp(i*b*u) * modified * eta * sw
+      fft_result = FFT(x)
+
+      k = [-b, -b+lambda, ..., -b+(N-1)*lambda]
+      values = Re(exp(-alpha*k) / pi * fft_result)
+
+      return (k, values)

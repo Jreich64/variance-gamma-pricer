@@ -1,0 +1,89 @@
+================================================================================
+_carr_madan_psi(self, u, T, alpha) -> complex or ndarray
+================================================================================
+
+PURPOSE
+-------
+Computes the Carr-Madan modified characteristic function Psi(u), which is the
+integrand (before the exponential shift) in the FFT pricing formula. This
+function incorporates the dampening factor alpha that regularizes the Fourier
+integral for call option pricing.
+
+INPUTS
+------
+  u     : float or ndarray  - Real-valued Fourier frequency variable(s).
+  T     : float             - Time to expiry in years.
+  alpha : float             - Dampening parameter (typically 1.0 to 2.0).
+
+OUTPUTS
+-------
+  complex or ndarray of complex - The modified characteristic function Psi(u).
+
+MATHEMATICS
+-----------
+THE NEED FOR DAMPENING:
+The standard call option price in Fourier space requires integrating
+the characteristic function against exp(-iuk). However, the call payoff
+max(S_T - K, 0) is not square-integrable because it grows linearly.
+This means the Fourier transform of the call price C(k) = C(exp(k)) does
+not exist without modification.
+
+Carr and Madan (1999) resolve this by introducing a dampening factor.
+Define the modified call price:
+
+    c(k) = exp(alpha * k) * C(k)
+
+where k = ln(K) is the log-strike. For alpha > 0, the exponential growth
+of exp(alpha*k) for k -> -inf (K -> 0) is offset by C(k) -> S (a finite
+limit), and for k -> +inf (K -> inf), C(k) -> 0 fast enough. The modified
+price c(k) is square-integrable when alpha > 0.
+
+THE MODIFIED CHARACTERISTIC FUNCTION:
+Taking the Fourier transform of c(k) and inverting:
+
+    c(k) = (1/pi) * integral_0^inf Re[exp(-iuk) * Psi(u)] du
+
+where:
+
+    Psi(u) = exp(-r*T) * phi(u - (alpha+1)*i)
+             / (alpha^2 + alpha - u^2 + i*(2*alpha+1)*u)
+
+DERIVATION:
+Starting from:
+    C(K) = exp(-rT) * E[max(S_T - K, 0)]
+
+The Fourier transform of exp(alpha*k)*C(exp(k)) with respect to k gives:
+
+    integral exp(iuk) * exp(alpha*k) * C(exp(k)) dk
+
+Substituting the risk-neutral pricing formula and evaluating the integral
+over the payoff max(exp(x) - exp(k), 0) with respect to k:
+
+    integral_{-inf}^{x} exp((alpha+1+iu)*k) dk = exp((alpha+1+iu)*x) / (alpha+1+iu)
+
+After taking the expectation under the risk-neutral measure:
+
+    Psi(u) = exp(-rT) * E[exp((alpha+1+iu)*X_T)] / ((iu+alpha)(iu+alpha+1))
+
+The numerator is the characteristic function evaluated at v = u-(alpha+1)*i:
+
+    phi(v) = phi(u - (alpha+1)*i)
+
+The denominator simplifies to:
+    (iu + alpha)(iu + alpha + 1) = alpha^2 + alpha - u^2 + i*(2*alpha+1)*u
+
+CHOOSING ALPHA:
+  - alpha must be > 0 for the dampened call to be integrable.
+  - alpha must satisfy: the characteristic function phi(u-(alpha+1)*i) must
+    exist, which requires (alpha+1) < the critical exponent of the VG MGF.
+  - Typical values: alpha = 1.5 (used as default in the code).
+  - Too small alpha: slow convergence of the integral.
+  - Too large alpha: numerical instability from exp(alpha*k) amplification.
+
+PSEUDOCODE
+----------
+  def _carr_madan_psi(u, T, alpha):
+      v = u - (alpha + 1) * i
+      phi = characteristic_function(v, T)
+      denom = alpha^2 + alpha - u^2 + i*(2*alpha + 1)*u
+      return exp(-r*T) * phi / denom
