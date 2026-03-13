@@ -150,8 +150,35 @@ def call_price(S_0, r, q, sigma, theta, nu, t, K):
 
 # ── Finite-difference Greeks (all use _price_only for speed) ─────────────
 
-def fd_delta(S_0, r, q, sigma, theta, nu, t, K, eps=1e-20):
-    eps = mp.mpf(eps)
+def _adaptive_eps(scale, order=1):
+    """Compute a precision-adaptive finite-difference step size.
+
+    For a central-difference scheme of a given *order* (1 for first derivative,
+    2 for second derivative), the optimal step balances truncation error
+    (O(h^2)) against cancellation error (O(eps_mach / h^order)).
+
+    Rule of thumb:
+      h ≈ scale * mach_eps^(1/(order+2))
+
+    where mach_eps = 10^(-dps) for mpmath arithmetic at *dps* decimal places.
+
+    Parameters
+    ----------
+    scale : mpf – characteristic magnitude (e.g. S_0 for delta/gamma)
+    order : int – derivative order (1 → delta, 2 → gamma)
+    """
+    dps = mp.mp.dps
+    # optimal exponent: 1/(order+2)  →  1/3 for delta, 1/4 for gamma
+    power = mp.mpf(1) / (order + 2)
+    mach_eps = mp.power(10, -dps)
+    return mp.fmul(mp.mpf(scale), mp.power(mach_eps, power))
+
+
+def fd_delta(S_0, r, q, sigma, theta, nu, t, K, eps=None):
+    if eps is None:
+        eps = _adaptive_eps(S_0, order=1)
+    else:
+        eps = mp.mpf(eps)
     S_plus = mp.fadd(S_0, eps)
     S_minus = mp.fsub(S_0, eps)
     price_up = _price_only(S_plus, r, q, sigma, theta, nu, t, K)
@@ -159,9 +186,12 @@ def fd_delta(S_0, r, q, sigma, theta, nu, t, K, eps=1e-20):
     return mp.fdiv(mp.fsub(price_up, price_down), mp.fmul(2, eps))
 
 
-def fd_gamma(S_0, r, q, sigma, theta, nu, t, K, eps=1e-20):
+def fd_gamma(S_0, r, q, sigma, theta, nu, t, K, eps=None):
     """FD gamma via central difference of price: (C(S+h) - 2C(S) + C(S-h)) / h^2."""
-    eps = mp.mpf(eps)
+    if eps is None:
+        eps = _adaptive_eps(S_0, order=2)
+    else:
+        eps = mp.mpf(eps)
     S_plus = mp.fadd(S_0, eps)
     S_minus = mp.fsub(S_0, eps)
     p_up = _price_only(S_plus, r, q, sigma, theta, nu, t, K)
@@ -172,9 +202,12 @@ def fd_gamma(S_0, r, q, sigma, theta, nu, t, K, eps=1e-20):
     return mp.fdiv(numer, mp.fmul(eps, eps))
 
 
-def fd_theta(S_0, r, q, sigma, theta, nu, t, K, eps=1e-10):
+def fd_theta(S_0, r, q, sigma, theta, nu, t, K, eps=None):
     """Finite-difference theta: dC/dT."""
-    eps = mp.mpf(eps)
+    if eps is None:
+        eps = _adaptive_eps(max(t, mp.mpf("0.01")), order=1)
+    else:
+        eps = mp.mpf(eps)
     t_plus = mp.fadd(t, eps)
     t_minus = mp.fsub(t, eps)
     price_up = _price_only(S_0, r, q, sigma, theta, nu, float(t_plus), K)
@@ -182,9 +215,12 @@ def fd_theta(S_0, r, q, sigma, theta, nu, t, K, eps=1e-10):
     return mp.fdiv(mp.fsub(price_up, price_down), mp.fmul(2, eps))
 
 
-def fd_vega(S_0, r, q, sigma, theta, nu, t, K, eps=1e-10):
+def fd_vega(S_0, r, q, sigma, theta, nu, t, K, eps=None):
     """Finite-difference vega: dC/d(sigma)."""
-    eps = mp.mpf(eps)
+    if eps is None:
+        eps = _adaptive_eps(sigma, order=1)
+    else:
+        eps = mp.mpf(eps)
     sig_plus = mp.fadd(sigma, eps)
     sig_minus = mp.fsub(sigma, eps)
     price_up = _price_only(S_0, r, q, float(sig_plus), theta, nu, t, K)
@@ -192,9 +228,12 @@ def fd_vega(S_0, r, q, sigma, theta, nu, t, K, eps=1e-10):
     return mp.fdiv(mp.fsub(price_up, price_down), mp.fmul(2, eps))
 
 
-def fd_rho(S_0, r, q, sigma, theta, nu, t, K, eps=1e-10):
+def fd_rho(S_0, r, q, sigma, theta, nu, t, K, eps=None):
     """Finite-difference rho: dC/dr."""
-    eps = mp.mpf(eps)
+    if eps is None:
+        eps = _adaptive_eps(max(abs(r), mp.mpf("0.01")), order=1)
+    else:
+        eps = mp.mpf(eps)
     r_plus = mp.fadd(r, eps)
     r_minus = mp.fsub(r, eps)
     price_up = _price_only(S_0, float(r_plus), q, sigma, theta, nu, t, K)
@@ -202,9 +241,12 @@ def fd_rho(S_0, r, q, sigma, theta, nu, t, K, eps=1e-10):
     return mp.fdiv(mp.fsub(price_up, price_down), mp.fmul(2, eps))
 
 
-def fd_theta_param(S_0, r, q, sigma, theta, nu, t, K, eps=1e-10):
+def fd_theta_param(S_0, r, q, sigma, theta, nu, t, K, eps=None):
     """Finite-difference sensitivity to VG theta parameter: dC/d(theta_VG)."""
-    eps = mp.mpf(eps)
+    if eps is None:
+        eps = _adaptive_eps(max(abs(theta), mp.mpf("0.01")), order=1)
+    else:
+        eps = mp.mpf(eps)
     th_plus = mp.fadd(theta, eps)
     th_minus = mp.fsub(theta, eps)
     price_up = _price_only(S_0, r, q, sigma, float(th_plus), nu, t, K)
@@ -212,9 +254,12 @@ def fd_theta_param(S_0, r, q, sigma, theta, nu, t, K, eps=1e-10):
     return mp.fdiv(mp.fsub(price_up, price_down), mp.fmul(2, eps))
 
 
-def fd_nu(S_0, r, q, sigma, theta, nu, t, K, eps=1e-10):
+def fd_nu(S_0, r, q, sigma, theta, nu, t, K, eps=None):
     """Finite-difference sensitivity to VG nu parameter: dC/d(nu)."""
-    eps = mp.mpf(eps)
+    if eps is None:
+        eps = _adaptive_eps(nu, order=1)
+    else:
+        eps = mp.mpf(eps)
     nu_plus = mp.fadd(nu, eps)
     nu_minus = mp.fsub(nu, eps)
     price_up = _price_only(S_0, r, q, sigma, theta, float(nu_plus), t, K)
@@ -244,7 +289,11 @@ def all_greeks(S_0, r, q, sigma, theta, nu, t, K):
     px, dlt, gma, e1, e2, e3 = call_price(S_0, r, q, sigma, theta, nu, t, K)
 
     # ── 2. S bumps: shared for fd_delta AND fd_gamma (4 integrals) ───
-    eps_S = mp.mpf("1e-20")
+    # Use the larger (gamma-optimal) step for both; delta is still accurate
+    # because its truncation error is O(h^2) and h ~ S * 10^{-dps/4} is
+    # comfortably small, while avoiding the catastrophic cancellation from
+    # dividing by h^2 when h is too tiny.
+    eps_S = _adaptive_eps(S_0, order=2)
     p_S_up = _price_only(mp.fadd(S_0, eps_S), r, q, sigma, theta, nu, t, K)
     p_S_dn = _price_only(mp.fsub(S_0, eps_S), r, q, sigma, theta, nu, t, K)
     fd_dlt = mp.fdiv(mp.fsub(p_S_up, p_S_dn), mp.fmul(2, eps_S))
@@ -254,32 +303,36 @@ def all_greeks(S_0, r, q, sigma, theta, nu, t, K):
     )
 
     # ── 3. Remaining FD Greeks (5 pairs × 4 integrals = 20) ─────────
-    eps = mp.mpf("1e-10")
 
     # theta (dC/dT)
-    p_t_up = _price_only(S_0, r, q, sigma, theta, nu, float(mp.fadd(t, eps)), K)
-    p_t_dn = _price_only(S_0, r, q, sigma, theta, nu, float(mp.fsub(t, eps)), K)
-    fd_th = mp.fdiv(mp.fsub(p_t_up, p_t_dn), mp.fmul(2, eps))
+    eps_t = _adaptive_eps(max(t, mp.mpf("0.01")), order=1)
+    p_t_up = _price_only(S_0, r, q, sigma, theta, nu, float(mp.fadd(t, eps_t)), K)
+    p_t_dn = _price_only(S_0, r, q, sigma, theta, nu, float(mp.fsub(t, eps_t)), K)
+    fd_th = mp.fdiv(mp.fsub(p_t_up, p_t_dn), mp.fmul(2, eps_t))
 
     # vega (dC/dσ)
-    p_sig_up = _price_only(S_0, r, q, float(mp.fadd(sigma, eps)), theta, nu, t, K)
-    p_sig_dn = _price_only(S_0, r, q, float(mp.fsub(sigma, eps)), theta, nu, t, K)
-    fd_vg = mp.fdiv(mp.fsub(p_sig_up, p_sig_dn), mp.fmul(2, eps))
+    eps_sig = _adaptive_eps(sigma, order=1)
+    p_sig_up = _price_only(S_0, r, q, float(mp.fadd(sigma, eps_sig)), theta, nu, t, K)
+    p_sig_dn = _price_only(S_0, r, q, float(mp.fsub(sigma, eps_sig)), theta, nu, t, K)
+    fd_vg = mp.fdiv(mp.fsub(p_sig_up, p_sig_dn), mp.fmul(2, eps_sig))
 
     # rho (dC/dr)
-    p_r_up = _price_only(S_0, float(mp.fadd(r, eps)), q, sigma, theta, nu, t, K)
-    p_r_dn = _price_only(S_0, float(mp.fsub(r, eps)), q, sigma, theta, nu, t, K)
-    fd_rh = mp.fdiv(mp.fsub(p_r_up, p_r_dn), mp.fmul(2, eps))
+    eps_r = _adaptive_eps(max(abs(r), mp.mpf("0.01")), order=1)
+    p_r_up = _price_only(S_0, float(mp.fadd(r, eps_r)), q, sigma, theta, nu, t, K)
+    p_r_dn = _price_only(S_0, float(mp.fsub(r, eps_r)), q, sigma, theta, nu, t, K)
+    fd_rh = mp.fdiv(mp.fsub(p_r_up, p_r_dn), mp.fmul(2, eps_r))
 
     # d/d(theta_VG)
-    p_thp_up = _price_only(S_0, r, q, sigma, float(mp.fadd(theta, eps)), nu, t, K)
-    p_thp_dn = _price_only(S_0, r, q, sigma, float(mp.fsub(theta, eps)), nu, t, K)
-    fd_thp = mp.fdiv(mp.fsub(p_thp_up, p_thp_dn), mp.fmul(2, eps))
+    eps_th = _adaptive_eps(max(abs(theta), mp.mpf("0.01")), order=1)
+    p_thp_up = _price_only(S_0, r, q, sigma, float(mp.fadd(theta, eps_th)), nu, t, K)
+    p_thp_dn = _price_only(S_0, r, q, sigma, float(mp.fsub(theta, eps_th)), nu, t, K)
+    fd_thp = mp.fdiv(mp.fsub(p_thp_up, p_thp_dn), mp.fmul(2, eps_th))
 
     # d/d(nu)
-    p_nu_up = _price_only(S_0, r, q, sigma, theta, float(mp.fadd(nu, eps)), t, K)
-    p_nu_dn = _price_only(S_0, r, q, sigma, theta, float(mp.fsub(nu, eps)), t, K)
-    fd_nv = mp.fdiv(mp.fsub(p_nu_up, p_nu_dn), mp.fmul(2, eps))
+    eps_nu = _adaptive_eps(nu, order=1)
+    p_nu_up = _price_only(S_0, r, q, sigma, theta, float(mp.fadd(nu, eps_nu)), t, K)
+    p_nu_dn = _price_only(S_0, r, q, sigma, theta, float(mp.fsub(nu, eps_nu)), t, K)
+    fd_nv = mp.fdiv(mp.fsub(p_nu_up, p_nu_dn), mp.fmul(2, eps_nu))
 
     return {
         "price": px,

@@ -38,6 +38,27 @@ if mart_cond <= 0:
 
 model = VarianceGammaModel(S, r, q, sigma, nu, theta_vg)
 
+# ── Sidebar: FFT / Numerical Settings ─────────────────────────────────────
+st.sidebar.header("FFT / Numerical Settings")
+alpha_damp = st.sidebar.number_input(
+    "Damping parameter (alpha)", value=1.5, min_value=0.01, max_value=50.0,
+    step=0.1, format="%.2f",
+    help="Carr-Madan dampening factor ensuring Fourier integrability of the call price."
+)
+fft_N = int(st.sidebar.selectbox("FFT grid size (N)", [1024, 2048, 4096, 8192, 16384], index=2))
+fft_eta = st.sidebar.number_input("Frequency spacing (eta)", value=0.25, min_value=0.01, max_value=1.0, step=0.05, format="%.4f")
+cos_N = int(st.sidebar.number_input("COS expansion terms", value=256, min_value=32, max_value=4096, step=32))
+cos_L = st.sidebar.number_input("COS truncation range (L)", value=10.0, min_value=2.0, max_value=50.0, step=1.0, format="%.1f")
+
+st.sidebar.markdown("---")
+st.sidebar.markdown(
+    "**Damping parameter (alpha):** The Carr-Madan FFT method multiplies the "
+    "call price by $e^{\\alpha k}$ (where $k = \\ln K$) to force the modified "
+    "call price into $L^1$ space, making the Fourier integral converge. "
+    "A value of $\\alpha = 1.5$ is the standard recommendation. Too small "
+    "causes oscillation; too large amplifies numerical noise at extreme strikes."
+)
+
 PLOT_MARGIN = dict(t=50, b=20)
 
 _dl_counter = 0
@@ -47,7 +68,7 @@ def plot_3d_with_download(fig, filename, key_prefix=""):
     """Display a 3D plotly figure and offer an HTML download button."""
     global _dl_counter
     _dl_counter += 1
-    st.plotly_chart(fig, use_container_width=True)
+    st.plotly_chart(fig, width="stretch")
     html_bytes = fig.to_html(include_plotlyjs="cdn").encode("utf-8")
     st.download_button(
         label=f"Download {filename}",
@@ -59,8 +80,7 @@ def plot_3d_with_download(fig, filename, key_prefix=""):
 
 
 def _sidebar_params_key():
-    """Return a tuple of sidebar params to detect changes."""
-    return (S, r, q, sigma, nu, theta_vg)
+    return (S, r, q, sigma, nu, theta_vg, alpha_damp, fft_N, fft_eta, cos_N, cos_L)
 
 
 def _eta_text(label, step, total, t0):
@@ -79,55 +99,116 @@ def _eta_text(label, step, total, t0):
 
 
 # ── Tabs ───────────────────────────────────────────────────────────────────
-tab_single, tab_curves, tab_greeks, tab_arb, tab_calib = st.tabs([
+tab_single, tab_curves, tab_greeks, tab_3d, tab_mse, tab_calib, tab_explain = st.tabs([
     "Single-Point Pricer",
     "Price Curves & Greeks",
     "Greeks (Custom)",
-    "Arbitrary Precision 3D",
+    "3D Surfaces by Method",
+    "Method Comparison (MSE)",
     "Calibration",
+    "Method Explanations",
 ])
 
 # ═══════════════════════════════════════════════════════════════════════════
-# TAB 1 — Single-Point Pricer
+# TAB 1 — Single-Point Pricer (all methods + timing)
 # ═══════════════════════════════════════════════════════════════════════════
 with tab_single:
     st.subheader("Single-Point Option Value & Greeks")
+    st.caption("All four pricing methods execute simultaneously for easy comparison.")
+
     with st.form("single_form"):
-        c1, c2, c3 = st.columns(3)
+        c1, c2, c3, c4 = st.columns(4)
         K_single = c1.number_input("Strike (K)", value=100.0, min_value=0.01, step=1.0, format="%.2f")
         T_single = c2.number_input("Time to Expiry (T, years)", value=0.5, min_value=0.01, step=0.05, format="%.4f")
         opt_type_single = c3.selectbox("Option Type", ["call", "put"])
+        arb_dps_sp = int(c4.number_input("Arb. precision (dps)", value=30, min_value=10, max_value=200, step=5, key="sp_dps"))
         submitted_single = st.form_submit_button("Calculate")
 
     if submitted_single:
-        call_px = model.price(K_single, T_single, "call")
-        put_px = model.price(K_single, T_single, "put")
-        parity_err = call_px - put_px - S * np.exp(-q * T_single) + K_single * np.exp(-r * T_single)
+        fft_kw = dict(N=fft_N, alpha=alpha_damp, eta=fft_eta)
 
-        mc1, mc2, mc3 = st.columns(3)
-        mc1.metric("Call Price", f"{call_px:.6f}")
-        mc2.metric("Put Price", f"{put_px:.6f}")
-        mc3.metric("Put-Call Parity Error", f"{parity_err:.2e}")
+        # FFT
+        t0 = time.perf_counter()
+        price_fft = model.price(K_single, T_single, opt_type_single, **fft_kw)
+        t_fft = time.perf_counter() - t0
+
+        # FRFT
+        t0 = time.perf_counter()
+        price_frft = model.price_frft(K_single, T_single, opt_type_single, **fft_kw)
+        t_frft = time.perf_counter() - t0
+
+        # COS
+        t0 = time.perf_counter()
+        price_cos = model.price_cos(K_single, T_single, opt_type_single, N_cos=cos_N, L=cos_L)
+        t_cos = time.perf_counter() - t0
+
+        # Arbitrary Precision
+        vg_mpmath.set_precision(arb_dps_sp)
+        t0 = time.perf_counter()
+        arb_call = float(vg_mpmath._price_only(S, r, q, sigma, theta_vg, nu, T_single, K_single))
+        if opt_type_single == "put":
+            arb_call = arb_call - S * np.exp(-q * T_single) + K_single * np.exp(-r * T_single)
+        t_arb = time.perf_counter() - t0
+
+        # Put-call parity check (FFT)
+        call_fft = model.price(K_single, T_single, "call", **fft_kw)
+        put_fft = model.price(K_single, T_single, "put", **fft_kw)
+        parity_err = call_fft - put_fft - S * np.exp(-q * T_single) + K_single * np.exp(-r * T_single)
+
+        st.markdown("#### Prices & Timing")
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        mc1.metric("FFT Price", f"{price_fft:.6f}", delta=f"{t_fft*1000:.1f} ms")
+        mc2.metric("FRFT Price", f"{price_frft:.6f}", delta=f"{t_frft*1000:.1f} ms")
+        mc3.metric("COS Price", f"{price_cos:.6f}", delta=f"{t_cos*1000:.1f} ms")
+        mc4.metric(f"Arb. Precision ({arb_dps_sp} dps)", f"{arb_call:.6f}", delta=f"{t_arb*1000:.1f} ms")
+
+        st.metric("Put-Call Parity Error (FFT)", f"{parity_err:.2e}")
 
         st.markdown("---")
         col_an, col_ad = st.columns(2)
 
         with col_an:
             st.markdown("**Analytical Greeks (FFT)**")
-            g_an = model.greeks(K_single, T_single, opt_type_single)
+            g_an = model.greeks(K_single, T_single, opt_type_single, **fft_kw)
             df_an = pd.DataFrame({"Greek": list(g_an.keys()), "Value": [f"{v:.6f}" for v in g_an.values()]})
-            st.dataframe(df_an, hide_index=True, use_container_width=True)
+            st.dataframe(df_an, hide_index=True, width="stretch")
 
         with col_ad:
             if _HAS_TORCH:
-                st.markdown("**Autodiff Greeks (PyTorch)**")
-                g_ad = model.greeks_ad(K_single, T_single, opt_type_single)
+                st.markdown("**Autodiff Greeks (PyTorch FFT)**")
+                g_ad = model.greeks_ad(K_single, T_single, opt_type_single, **fft_kw)
                 df_ad = pd.DataFrame({
                     "Greek": list(g_ad.keys()),
                     "Autodiff": [f"{v:.6f}" for v in g_ad.values()],
                     "|Diff|": [f"{abs(g_an[k] - g_ad[k]):.2e}" for k in g_an],
                 })
-                st.dataframe(df_ad, hide_index=True, use_container_width=True)
+                st.dataframe(df_ad, hide_index=True, width="stretch")
+
+                st.markdown("---")
+                st.markdown("**Autodiff Greeks — FRFT & COS (PyTorch)**")
+                ad_col1, ad_col2 = st.columns(2)
+                with ad_col1:
+                    st.markdown("*FRFT*")
+                    t0 = time.perf_counter()
+                    g_ad_frft = model.greeks_ad_frft(K_single, T_single, opt_type_single, **fft_kw)
+                    t_ad_frft = time.perf_counter() - t0
+                    df_frft_ad = pd.DataFrame({
+                        "Greek": list(g_ad_frft.keys()),
+                        "Value": [f"{v:.6f}" for v in g_ad_frft.values()],
+                    })
+                    st.dataframe(df_frft_ad, hide_index=True, width="stretch")
+                    st.caption(f"⏱ {t_ad_frft*1000:.1f} ms")
+                with ad_col2:
+                    st.markdown("*COS*")
+                    t0 = time.perf_counter()
+                    g_ad_cos = model.greeks_ad_cos(K_single, T_single, opt_type_single, N_cos=cos_N, L=cos_L)
+                    t_ad_cos = time.perf_counter() - t0
+                    df_cos_ad = pd.DataFrame({
+                        "Greek": list(g_ad_cos.keys()),
+                        "Value": [f"{v:.6f}" for v in g_ad_cos.values()],
+                    })
+                    st.dataframe(df_cos_ad, hide_index=True, width="stretch")
+                    st.caption(f"⏱ {t_ad_cos*1000:.1f} ms")
             else:
                 st.info("Install PyTorch for autodiff Greeks: `pip install torch`")
 
@@ -164,7 +245,7 @@ with tab_curves:
         progress = st.progress(0, text="Analytical Greeks...")
         t0_an = time.perf_counter()
         for idx, k in enumerate(K_arr):
-            g = model.greeks(k, T_curve, opt_type_curve)
+            g = model.greeks(k, T_curve, opt_type_curve, N=fft_N, alpha=alpha_damp, eta=fft_eta)
             for gn in an_data:
                 an_data[gn].append(g[gn])
             progress.progress((idx + 1) / len(K_arr),
@@ -182,7 +263,7 @@ with tab_curves:
             progress2 = st.progress(0, text="Autodiff Greeks...")
             t0_ad = time.perf_counter()
             for idx, k in enumerate(K_arr):
-                g = model.greeks_ad(k, T_curve, opt_type_curve)
+                g = model.greeks_ad(k, T_curve, opt_type_curve, N=fft_N, alpha=alpha_damp, eta=fft_eta)
                 for gn in ad_data:
                     ad_data[gn].append(g[gn])
                 progress2.progress((idx + 1) / len(K_arr),
@@ -207,7 +288,7 @@ with tab_curves:
         an_surfaces = {gn: np.zeros((n_pts, n_pts)) for gn in surface_names}
         for i, t in enumerate(T_range):
             for j, k in enumerate(K_surf):
-                g = model.greeks(k, t, "call")
+                g = model.greeks(k, t, "call", N=fft_N, alpha=alpha_damp, eta=fft_eta)
                 for gn in surface_names:
                     an_surfaces[gn][i, j] = g[gn]
             progress_3d.progress((i + 1) / n_pts,
@@ -221,7 +302,7 @@ with tab_curves:
             ad_surfaces = {gn: np.zeros((n_pts, n_pts)) for gn in surface_names}
             for i, t in enumerate(T_range):
                 for j, k in enumerate(K_surf):
-                    g = model.greeks_ad(k, t, "call")
+                    g = model.greeks_ad(k, t, "call", N=fft_N, alpha=alpha_damp, eta=fft_eta)
                     for gn in surface_names:
                         ad_surfaces[gn][i, j] = g[gn]
                 progress_3d_ad.progress((i + 1) / n_pts,
@@ -285,7 +366,7 @@ with tab_curves:
             for gn in all_greek_names:
                 mse = float(np.mean((an_data[gn] - ad_data[gn]) ** 2))
                 mse_rows.append({"Greek": gn, "MSE": f"{mse:.4e}"})
-            st.dataframe(pd.DataFrame(mse_rows), hide_index=True, use_container_width=True)
+            st.dataframe(pd.DataFrame(mse_rows), hide_index=True, width="stretch")
             st.markdown("")
 
         # ── Price curve ───────────────────────────────────────────────
@@ -300,7 +381,7 @@ with tab_curves:
             xaxis_title="Moneyness (S/K)", yaxis_title="Price",
             height=420, margin=PLOT_MARGIN,
         )
-        st.plotly_chart(fig_price, use_container_width=True)
+        st.plotly_chart(fig_price, width="stretch")
 
         st.markdown("<br>", unsafe_allow_html=True)
 
@@ -336,7 +417,7 @@ with tab_curves:
             legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="center", x=0.5),
             margin=dict(t=80, b=20),
         )
-        st.plotly_chart(fig_greeks, use_container_width=True)
+        st.plotly_chart(fig_greeks, width="stretch")
 
         st.markdown("<br><br>", unsafe_allow_html=True)
 
@@ -402,7 +483,7 @@ with tab_greeks:
         progress_an = st.progress(0, text="Computing analytical Greeks...")
         t0_an = time.perf_counter()
         for idx, k in enumerate(K_arr):
-            g = model.greeks(k, T_greek, opt_type_grk)
+            g = model.greeks(k, T_greek, opt_type_grk, N=fft_N, alpha=alpha_damp, eta=fft_eta)
             for gn in greek_names:
                 data_an[gn].append(g[gn])
             progress_an.progress((idx + 1) / len(K_arr),
@@ -418,7 +499,7 @@ with tab_greeks:
             progress_ad = st.progress(0, text="Computing autodiff Greeks...")
             t0_ad = time.perf_counter()
             for idx, k in enumerate(K_arr):
-                g = model.greeks_ad(k, T_greek, opt_type_grk)
+                g = model.greeks_ad(k, T_greek, opt_type_grk, N=fft_N, alpha=alpha_damp, eta=fft_eta)
                 for gn in greek_names:
                     data_ad[gn].append(g[gn])
                 progress_ad.progress((idx + 1) / len(K_arr),
@@ -480,208 +561,291 @@ with tab_greeks:
                         itemsizing="constant"),
             margin=dict(t=80, b=20),
         )
-        st.plotly_chart(fig, use_container_width=True)
+        st.plotly_chart(fig, width="stretch")
 
 # ═══════════════════════════════════════════════════════════════════════════
-# TAB 4 — Arbitrary Precision 3D Surfaces (mpmath)
+# TAB 4 — 3D Surfaces by Method (FFT, FRFT, COS, Arb Precision)
 # ═══════════════════════════════════════════════════════════════════════════
-with tab_arb:
-    st.subheader("Arbitrary Precision (mpmath)")
+with tab_3d:
+    st.subheader("3D Price Surfaces by Method")
     st.caption(
-        "Uses mpmath adaptive quadrature (not FFT) with user-selectable decimal precision. "
-        "Analytical price, delta & gamma via quadrature; all other Greeks via "
-        "arbitrary-precision finite differences."
+        "Computes a price surface (moneyness × time to expiry) for each method "
+        "individually, with timing. Arbitrary Precision is the slowest — keep its "
+        "grid small (≤ 15)."
     )
 
-    # ── Single-point pricer ───────────────────────────────────────────
-    st.markdown("#### Single-Point Arbitrary Precision Pricer")
-    with st.form("arb_single_form"):
-        asc1, asc2, asc3, asc4 = st.columns(4)
-        arb_K_single = asc1.number_input("Strike (K)", value=100.0, min_value=0.01, step=1.0, format="%.2f", key="arb_K_single")
-        arb_T_single = asc2.number_input("Expiry (T)", value=0.5, min_value=0.01, step=0.05, format="%.4f", key="arb_T_single")
-        arb_opt_single = asc3.selectbox("Option Type", ["call", "put"], key="arb_opt_single")
-        arb_dps_single = int(asc4.number_input("Decimal places", value=50, min_value=10, max_value=500, step=10, key="arb_dps_single"))
-        submitted_arb_single = st.form_submit_button("Price (arbitrary precision)")
+    with st.form("surf3d_form"):
+        sc1, sc2, sc3 = st.columns(3)
+        surf_n_m = int(sc1.number_input("Moneyness grid points", value=20, min_value=3, max_value=100, step=1, key="surf_nm"))
+        surf_n_t = int(sc2.number_input("Expiry grid points", value=20, min_value=3, max_value=100, step=1, key="surf_nt"))
+        surf_opt = sc3.selectbox("Option Type", ["call", "put"], key="surf_opt")
 
-    if submitted_arb_single:
-        vg_mpmath.set_precision(arb_dps_single)
-        t0_sp = time.perf_counter()
-        greeks_sp = vg_mpmath.all_greeks(S, r, q, sigma, theta_vg, nu, arb_T_single, arb_K_single)
-        t_sp = time.perf_counter() - t0_sp
+        sm1, sm2 = st.columns(2)
+        surf_m_lo = sm1.number_input("Min moneyness (S/K)", value=0.7, min_value=0.01, step=0.05, format="%.2f", key="surf_mlo")
+        surf_m_hi = sm2.number_input("Max moneyness (S/K)", value=1.3, min_value=0.1, step=0.05, format="%.2f", key="surf_mhi")
 
-        # Put-call parity adjustments
-        if arb_opt_single == "put":
-            disc_S = float(S) * np.exp(-q * arb_T_single)
-            disc_K = float(arb_K_single) * np.exp(-r * arb_T_single)
-            greeks_sp["price"] = float(greeks_sp["price"]) - disc_S + disc_K
-            greeks_sp["delta"] = float(greeks_sp["delta"]) - np.exp(-q * arb_T_single)
-            greeks_sp["fd_delta"] = float(greeks_sp["fd_delta"]) - np.exp(-q * arb_T_single)
-            greeks_sp["theta"] = float(greeks_sp["theta"]) + q * disc_S - r * disc_K
-            greeks_sp["rho"] = float(greeks_sp["rho"]) - arb_K_single * arb_T_single * np.exp(-r * arb_T_single)
+        st1, st2 = st.columns(2)
+        surf_T_lo = st1.number_input("Min expiry (T)", value=0.1, min_value=0.01, step=0.05, format="%.2f", key="surf_tlo")
+        surf_T_hi = st2.number_input("Max expiry (T)", value=2.0, min_value=0.05, step=0.1, format="%.2f", key="surf_thi")
 
-        st.session_state["tab_arb_single"] = {
-            "greeks_sp": {k: str(v) for k, v in greeks_sp.items()},
-            "t_sp": t_sp,
-            "arb_dps_single": arb_dps_single,
-            "arb_opt_single": arb_opt_single,
-            "arb_K_single": arb_K_single,
-            "arb_T_single": arb_T_single,
-            "params_key": _sidebar_params_key(),
-        }
+        sp1, sp2 = st.columns(2)
+        surf_dps = int(sp1.number_input("Arb. precision (dps)", value=30, min_value=10, max_value=200, step=5, key="surf_dps"))
+        surf_arb_pts = int(sp2.number_input("Arb. precision grid points (may differ)", value=8, min_value=3, max_value=50, step=1, key="surf_arb_pts"))
 
-    if "tab_arb_single" in st.session_state and st.session_state["tab_arb_single"]["params_key"] == _sidebar_params_key():
-        _tsp = st.session_state["tab_arb_single"]
-        st.metric("Computation Time", f"{_tsp['t_sp']:.2f} s")
-        st.info(f"Precision: **{_tsp['arb_dps_single']}** dps  |  "
-                f"K={_tsp['arb_K_single']}  T={_tsp['arb_T_single']}  "
-                f"Option: **{_tsp['arb_opt_single'].title()}**")
+        submitted_3d = st.form_submit_button("Compute All Surfaces")
 
-        sp_nice = {
-            "price": "Price", "delta": "Delta (analytical)", "gamma": "Gamma (analytical)",
-            "fd_delta": "Delta (FD)", "fd_gamma": "Gamma (FD)",
-            "theta": "Theta (FD)", "vega": "Vega (FD)", "rho": "Rho (FD)",
-            "d_theta_param": "d/d(theta_VG) (FD)", "d_nu": "d/d(nu) (FD)",
-        }
-        rows_sp = []
-        for k in ["price", "delta", "gamma", "fd_delta", "fd_gamma",
-                   "theta", "vega", "rho", "d_theta_param", "d_nu"]:
-            rows_sp.append({"Greek": sp_nice[k], "Value": _tsp["greeks_sp"][k]})
-        st.dataframe(pd.DataFrame(rows_sp), hide_index=True, use_container_width=True)
+    if submitted_3d:
+        m_vals_3d = np.linspace(surf_m_lo, surf_m_hi, surf_n_m)
+        T_vals_3d = np.linspace(surf_T_lo, surf_T_hi, surf_n_t)
+        K_vals_3d = S / m_vals_3d
+        fft_kw = dict(N=fft_N, alpha=alpha_damp, eta=fft_eta)
 
-    st.markdown("---")
+        total = surf_n_m * surf_n_t
 
-    # ── 3D Surfaces ───────────────────────────────────────────────────
-    st.markdown("#### 3D Surfaces vs Moneyness & Expiry")
-    st.caption("**Much slower** than FFT — keep grid sizes small (≤ 15). "
-               "FD Greeks require extra pricing calls per grid point.")
-
-    with st.form("arb_form"):
-        ac1, ac2, ac3 = st.columns(3)
-        arb_dps = int(ac1.number_input(
-            "Decimal places (dps)", value=30, min_value=10, max_value=200, step=5, key="arb_dps"
-        ))
-        arb_n_pts = int(ac2.number_input(
-            "Grid points", value=8, min_value=3, max_value=1000, step=1, key="arb_npts"
-        ))
-        arb_opt = ac3.selectbox("Option Type", ["call", "put"], key="arb_opt")
-
-        am1, am2 = st.columns(2)
-        arb_m_lo = am1.number_input("Min moneyness (S/K)", value=0.8, min_value=0.01, step=0.05, format="%.2f", key="arb_mlo")
-        arb_m_hi = am2.number_input("Max moneyness (S/K)", value=1.2, min_value=0.1, step=0.05, format="%.2f", key="arb_mhi")
-
-        at1, at2 = st.columns(2)
-        arb_T_lo = at1.number_input("Min expiry (T)", value=0.1, min_value=0.01, step=0.05, format="%.2f", key="arb_tlo")
-        arb_T_hi = at2.number_input("Max expiry (T)", value=1.5, min_value=0.05, step=0.1, format="%.2f", key="arb_thi")
-
-        arb_include_fd = st.checkbox("Include FD Greeks (theta, vega, rho, d/d_theta, d/d_nu) — much slower",
-                                     value=False, key="arb_include_fd")
-
-        submitted_arb = st.form_submit_button("Compute Surfaces")
-
-    if submitted_arb:
-        vg_mpmath.set_precision(arb_dps)
-
-        m_range_arb = np.linspace(arb_m_lo, arb_m_hi, arb_n_pts)
-        T_range_arb = np.linspace(arb_T_lo, arb_T_hi, arb_n_pts)
-        K_range_arb = S / m_range_arb
-
-        all_surf_names = ["price", "delta", "gamma", "fd_delta", "fd_gamma"]
-        fd_extra_names = ["theta", "vega", "rho", "d_theta_param", "d_nu"]
-        if arb_include_fd:
-            all_surf_names += fd_extra_names
-
-        arb_surfaces = {gn: np.zeros((arb_n_pts, arb_n_pts)) for gn in all_surf_names}
-
-        total_steps = arb_n_pts * arb_n_pts
-        progress_arb = st.progress(0, text=f"Computing mpmath surfaces ({arb_dps} dps)...")
-        t0_arb = time.perf_counter()
-
+        # ── FFT ──────────────────────────────────────────────────────
+        fft_surf = np.zeros((surf_n_t, surf_n_m))
+        prog = st.progress(0, text="Computing FFT surface...")
+        t0 = time.perf_counter()
         step = 0
-        for i, t_val in enumerate(T_range_arb):
-            for j, k_val in enumerate(K_range_arb):
-                if arb_include_fd:
-                    g = vg_mpmath.all_greeks(S, r, q, sigma, theta_vg, nu, float(t_val), float(k_val))
-                    for gn in all_surf_names:
-                        arb_surfaces[gn][i, j] = float(g[gn])
-                else:
-                    px, dlt, gma, _, _, _ = vg_mpmath.call_price(
-                        S, r, q, sigma, theta_vg, nu, float(t_val), float(k_val)
-                    )
-                    fd_d = vg_mpmath.fd_delta(S, r, q, sigma, theta_vg, nu, float(t_val), float(k_val))
-                    fd_g = vg_mpmath.fd_gamma(S, r, q, sigma, theta_vg, nu, float(t_val), float(k_val))
-                    arb_surfaces["price"][i, j] = float(px)
-                    arb_surfaces["delta"][i, j] = float(dlt)
-                    arb_surfaces["gamma"][i, j] = float(gma)
-                    arb_surfaces["fd_delta"][i, j] = float(fd_d)
-                    arb_surfaces["fd_gamma"][i, j] = float(fd_g)
-
-                # Put-call parity adjustments
-                if arb_opt == "put":
-                    tv = float(t_val)
-                    kv = float(k_val)
-                    disc_S = S * np.exp(-q * tv)
-                    disc_K = kv * np.exp(-r * tv)
-                    arb_surfaces["price"][i, j] = arb_surfaces["price"][i, j] - disc_S + disc_K
-                    arb_surfaces["delta"][i, j] = arb_surfaces["delta"][i, j] - np.exp(-q * tv)
-                    arb_surfaces["fd_delta"][i, j] = arb_surfaces["fd_delta"][i, j] - np.exp(-q * tv)
-                    # gamma same for call/put
-                    if arb_include_fd:
-                        arb_surfaces["theta"][i, j] = arb_surfaces["theta"][i, j] + q * disc_S - r * disc_K
-                        arb_surfaces["rho"][i, j] = arb_surfaces["rho"][i, j] - kv * tv * np.exp(-r * tv)
-
+        for i, tv in enumerate(T_vals_3d):
+            for j, kv in enumerate(K_vals_3d):
+                fft_surf[i, j] = model.price(kv, float(tv), surf_opt, **fft_kw)
                 step += 1
-                progress_arb.progress(step / total_steps,
-                                      text=_eta_text(f"mpmath ({arb_dps} dps)", step, total_steps, t0_arb))
+                prog.progress(step / total, text=_eta_text("FFT surface", step, total, t0))
+        t_fft_surf = time.perf_counter() - t0
+        prog.empty()
 
-        t_arb_elapsed = time.perf_counter() - t0_arb
-        progress_arb.empty()
+        # ── FRFT ─────────────────────────────────────────────────────
+        frft_surf = np.zeros((surf_n_t, surf_n_m))
+        prog = st.progress(0, text="Computing FRFT surface...")
+        t0 = time.perf_counter()
+        step = 0
+        for i, tv in enumerate(T_vals_3d):
+            for j, kv in enumerate(K_vals_3d):
+                frft_surf[i, j] = model.price_frft(kv, float(tv), surf_opt, **fft_kw)
+                step += 1
+                prog.progress(step / total, text=_eta_text("FRFT surface", step, total, t0))
+        t_frft_surf = time.perf_counter() - t0
+        prog.empty()
 
-        st.session_state["tab_arb"] = {
-            "arb_surfaces": arb_surfaces,
-            "all_surf_names": all_surf_names,
-            "m_range_arb": m_range_arb,
-            "T_range_arb": T_range_arb,
-            "t_arb_elapsed": t_arb_elapsed,
-            "arb_dps": arb_dps,
-            "arb_opt": arb_opt,
-            "arb_include_fd": arb_include_fd,
+        # ── COS ──────────────────────────────────────────────────────
+        cos_surf = np.zeros((surf_n_t, surf_n_m))
+        prog = st.progress(0, text="Computing COS surface...")
+        t0 = time.perf_counter()
+        step = 0
+        for i, tv in enumerate(T_vals_3d):
+            for j, kv in enumerate(K_vals_3d):
+                cos_surf[i, j] = model.price_cos(kv, float(tv), surf_opt, N_cos=cos_N, L=cos_L)
+                step += 1
+                prog.progress(step / total, text=_eta_text("COS surface", step, total, t0))
+        t_cos_surf = time.perf_counter() - t0
+        prog.empty()
+
+        # ── Arbitrary Precision ──────────────────────────────────────
+        vg_mpmath.set_precision(surf_dps)
+        m_vals_arb = np.linspace(surf_m_lo, surf_m_hi, surf_arb_pts)
+        T_vals_arb = np.linspace(surf_T_lo, surf_T_hi, surf_arb_pts)
+        K_vals_arb = S / m_vals_arb
+        total_arb = surf_arb_pts * surf_arb_pts
+        arb_surf = np.zeros((surf_arb_pts, surf_arb_pts))
+        prog = st.progress(0, text=f"Computing Arb. Precision surface ({surf_dps} dps)...")
+        t0 = time.perf_counter()
+        step = 0
+        for i, tv in enumerate(T_vals_arb):
+            for j, kv in enumerate(K_vals_arb):
+                arb_call = float(vg_mpmath._price_only(
+                    S, r, q, sigma, theta_vg, nu, float(tv), float(kv)
+                ))
+                if surf_opt == "put":
+                    arb_call = arb_call - S * np.exp(-q * float(tv)) + float(kv) * np.exp(-r * float(tv))
+                arb_surf[i, j] = arb_call
+                step += 1
+                prog.progress(step / total_arb, text=_eta_text(f"Arb. Precision ({surf_dps} dps)", step, total_arb, t0))
+        t_arb_surf = time.perf_counter() - t0
+        prog.empty()
+
+        st.session_state["tab_3d"] = {
+            "fft_surf": fft_surf, "frft_surf": frft_surf,
+            "cos_surf": cos_surf, "arb_surf": arb_surf,
+            "m_vals_3d": m_vals_3d, "T_vals_3d": T_vals_3d,
+            "m_vals_arb": m_vals_arb, "T_vals_arb": T_vals_arb,
+            "t_fft": t_fft_surf, "t_frft": t_frft_surf,
+            "t_cos": t_cos_surf, "t_arb": t_arb_surf,
+            "surf_opt": surf_opt, "surf_dps": surf_dps,
             "params_key": _sidebar_params_key(),
         }
 
-    if "tab_arb" in st.session_state and st.session_state["tab_arb"]["params_key"] == _sidebar_params_key():
-        _ta = st.session_state["tab_arb"]
+    if "tab_3d" in st.session_state and st.session_state["tab_3d"]["params_key"] == _sidebar_params_key():
+        _ts = st.session_state["tab_3d"]
 
-        st.metric("Computation Time", f"{_ta['t_arb_elapsed']:.2f} s")
-        fd_note = " (incl. FD Greeks)" if _ta.get("arb_include_fd") else ""
-        st.info(f"Precision: **{_ta['arb_dps']}** dps{fd_note}  |  Option: **{_ta['arb_opt'].title()}**")
+        st.markdown("#### Timing Comparison")
+        tc1, tc2, tc3, tc4 = st.columns(4)
+        tc1.metric("FFT", f"{_ts['t_fft']:.3f} s")
+        tc2.metric("FRFT", f"{_ts['t_frft']:.3f} s")
+        tc3.metric("COS", f"{_ts['t_cos']:.3f} s")
+        tc4.metric(f"Arb. Prec. ({_ts['surf_dps']} dps)", f"{_ts['t_arb']:.3f} s")
 
-        arb_labels = {
-            "price": "Call Price" if _ta["arb_opt"] == "call" else "Put Price",
-            "delta": "Delta (analytical)", "gamma": "Gamma (analytical)",
-            "fd_delta": "Delta (FD)", "fd_gamma": "Gamma (FD)",
-            "theta": "Theta (FD)", "vega": "Vega (FD)", "rho": "Rho (FD)",
-            "d_theta_param": "d/d(theta_VG) (FD)", "d_nu": "d/d(nu) (FD)",
-        }
+        st.markdown("---")
 
-        for gn in _ta["all_surf_names"]:
-            fig_arb = go.Figure(data=[go.Surface(
-                x=_ta["m_range_arb"], y=_ta["T_range_arb"], z=_ta["arb_surfaces"][gn],
-                colorscale="Plasma",
+        colorscales = {"FFT": "Viridis", "FRFT": "Cividis", "COS": "Plasma", "Arb. Precision": "Inferno"}
+        method_data = [
+            ("FFT", _ts["fft_surf"], _ts["m_vals_3d"], _ts["T_vals_3d"], _ts["t_fft"]),
+            ("FRFT", _ts["frft_surf"], _ts["m_vals_3d"], _ts["T_vals_3d"], _ts["t_frft"]),
+            ("COS", _ts["cos_surf"], _ts["m_vals_3d"], _ts["T_vals_3d"], _ts["t_cos"]),
+            ("Arb. Precision", _ts["arb_surf"], _ts["m_vals_arb"], _ts["T_vals_arb"], _ts["t_arb"]),
+        ]
+
+        for mname, surf, m_v, T_v, t_elapsed in method_data:
+            st.markdown(f"##### {mname}  ({t_elapsed:.3f} s)")
+            fig_s = go.Figure(data=[go.Surface(
+                x=m_v, y=T_v, z=surf, colorscale=colorscales[mname]
             )])
-            fig_arb.update_layout(
-                title=f"Arbitrary Precision {arb_labels[gn]} ({_ta['arb_dps']} dps)",
-                scene=dict(
-                    xaxis_title="Moneyness (S/K)",
-                    yaxis_title="Expiry (T)",
-                    zaxis_title=arb_labels[gn],
-                ),
+            fig_s.update_layout(
+                title=f"{mname} — {_ts['surf_opt'].title()} Price Surface",
+                scene=dict(xaxis_title="Moneyness (S/K)", yaxis_title="Expiry (T)",
+                           zaxis_title="Price"),
                 height=500, margin=dict(t=50, b=10),
             )
-            plot_3d_with_download(fig_arb, f"mpmath_{gn}_surface.html", key_prefix=f"arb_{gn}")
+            plot_3d_with_download(fig_s, f"{mname.lower().replace(' ', '_')}_surface.html",
+                                 key_prefix=f"s3d_{mname}")
             st.markdown("<br>", unsafe_allow_html=True)
 
 # ═══════════════════════════════════════════════════════════════════════════
-# TAB 5 — Calibration
+# TAB 5 — Method Comparison (MSE Matrix)
+# ═══════════════════════════════════════════════════════════════════════════
+with tab_mse:
+    st.subheader("Method Comparison — MSE Matrix")
+    st.markdown(
+        "Computes prices across a grid of **time-to-expiry** and **moneyness** "
+        "using four methods (FFT, FRFT, COS, Arbitrary Precision) and shows "
+        "the Mean Squared Error between each pair. "
+        "Arbitrary Precision (mpmath) is used as the reference when available."
+    )
+
+    st.markdown("---")
+
+    with st.form("mse_form"):
+        mse_c1, mse_c2, mse_c3 = st.columns(3)
+        mse_n_m = int(mse_c1.number_input("Moneyness grid points", value=3, min_value=2, max_value=20, step=1, key="mse_nm"))
+        mse_n_t = int(mse_c2.number_input("Expiry grid points", value=3, min_value=2, max_value=20, step=1, key="mse_nt"))
+        mse_opt = mse_c3.selectbox("Option Type", ["call", "put"], key="mse_opt")
+
+        mse_m1, mse_m2 = st.columns(2)
+        mse_m_lo = mse_m1.number_input("Min moneyness (S/K)", value=0.8, min_value=0.01, step=0.05, format="%.2f", key="mse_mlo")
+        mse_m_hi = mse_m2.number_input("Max moneyness (S/K)", value=1.2, min_value=0.1, step=0.05, format="%.2f", key="mse_mhi")
+
+        mse_t1, mse_t2 = st.columns(2)
+        mse_T_lo = mse_t1.number_input("Min expiry (T)", value=0.1, min_value=0.01, step=0.05, format="%.2f", key="mse_tlo")
+        mse_T_hi = mse_t2.number_input("Max expiry (T)", value=1.0, min_value=0.05, step=0.1, format="%.2f", key="mse_thi")
+
+        mse_dps = int(mse_t1.number_input("Arb. precision (dps)", value=30, min_value=10, max_value=200, step=5, key="mse_dps"))
+
+        submitted_mse = st.form_submit_button("Compute MSE Matrix")
+
+    if submitted_mse:
+        vg_mpmath.set_precision(mse_dps)
+        m_vals = np.linspace(mse_m_lo, mse_m_hi, mse_n_m)
+        T_vals = np.linspace(mse_T_lo, mse_T_hi, mse_n_t)
+        K_vals = S / m_vals
+
+        total = mse_n_m * mse_n_t
+        fft_prices = np.zeros((mse_n_t, mse_n_m))
+        frft_prices = np.zeros((mse_n_t, mse_n_m))
+        cos_prices = np.zeros((mse_n_t, mse_n_m))
+        arb_prices = np.zeros((mse_n_t, mse_n_m))
+
+        fft_kw = dict(N=fft_N, alpha=alpha_damp, eta=fft_eta)
+
+        progress_mse = st.progress(0, text="Computing prices across grid...")
+        t0_mse = time.perf_counter()
+        step = 0
+        for i, t_val in enumerate(T_vals):
+            for j, k_val in enumerate(K_vals):
+                fft_prices[i, j] = model.price(k_val, float(t_val), mse_opt, **fft_kw)
+                frft_prices[i, j] = model.price_frft(k_val, float(t_val), mse_opt, **fft_kw)
+                cos_prices[i, j] = model.price_cos(k_val, float(t_val), mse_opt, N_cos=cos_N, L=cos_L)
+
+                arb_call = float(vg_mpmath._price_only(
+                    S, r, q, sigma, theta_vg, nu, float(t_val), float(k_val)
+                ))
+                if mse_opt == "put":
+                    arb_call = arb_call - S * np.exp(-q * float(t_val)) + float(k_val) * np.exp(-r * float(t_val))
+                arb_prices[i, j] = arb_call
+
+                step += 1
+                progress_mse.progress(step / total,
+                                      text=_eta_text("MSE grid", step, total, t0_mse))
+        t_mse_elapsed = time.perf_counter() - t0_mse
+        progress_mse.empty()
+
+        methods = {"FFT": fft_prices, "FRFT": frft_prices, "COS": cos_prices, "Arb. Precision": arb_prices}
+        method_names = list(methods.keys())
+
+        # Pairwise MSE matrix
+        n_methods = len(method_names)
+        mse_matrix = np.zeros((n_methods, n_methods))
+        for a_idx in range(n_methods):
+            for b_idx in range(n_methods):
+                diff = methods[method_names[a_idx]] - methods[method_names[b_idx]]
+                mse_matrix[a_idx, b_idx] = np.mean(diff ** 2)
+
+        st.session_state["tab_mse"] = {
+            "mse_matrix": mse_matrix,
+            "method_names": method_names,
+            "methods": {k: v.tolist() for k, v in methods.items()},
+            "m_vals": m_vals.tolist(),
+            "T_vals": T_vals.tolist(),
+            "t_mse_elapsed": t_mse_elapsed,
+            "mse_opt": mse_opt,
+            "mse_dps": mse_dps,
+            "params_key": _sidebar_params_key(),
+        }
+
+    if "tab_mse" in st.session_state and st.session_state["tab_mse"]["params_key"] == _sidebar_params_key():
+        _tm = st.session_state["tab_mse"]
+        st.metric("Computation Time", f"{_tm['t_mse_elapsed']:.2f} s")
+        st.info(f"Option: **{_tm['mse_opt'].title()}** | Arb. precision: **{_tm['mse_dps']}** dps")
+
+        st.markdown("#### Pairwise MSE Matrix")
+        df_mse = pd.DataFrame(
+            _tm["mse_matrix"],
+            index=_tm["method_names"],
+            columns=_tm["method_names"],
+        )
+        # Format for display
+        df_mse_display = df_mse.map(lambda x: f"{x:.4e}")
+        st.dataframe(df_mse_display, width="stretch")
+
+        st.markdown("#### Price Comparison Table (sample)")
+        m_vals = _tm["m_vals"]
+        T_vals = _tm["T_vals"]
+        rows = []
+        for i, t_val in enumerate(T_vals):
+            for j, m_val in enumerate(m_vals):
+                row = {"T": f"{t_val:.3f}", "S/K": f"{m_val:.3f}"}
+                for mname in _tm["method_names"]:
+                    row[mname] = f"{_tm['methods'][mname][i][j]:.6f}"
+                rows.append(row)
+        st.dataframe(pd.DataFrame(rows), hide_index=True, width="stretch")
+
+        # Heatmap of MSE
+        fig_heat = go.Figure(data=go.Heatmap(
+            z=_tm["mse_matrix"],
+            x=_tm["method_names"],
+            y=_tm["method_names"],
+            colorscale="Reds",
+            text=[[f"{v:.2e}" for v in row] for row in _tm["mse_matrix"]],
+            texttemplate="%{text}",
+            textfont={"size": 12},
+        ))
+        fig_heat.update_layout(
+            title="Pairwise MSE Heatmap",
+            height=400, margin=PLOT_MARGIN,
+        )
+        st.plotly_chart(fig_heat, width="stretch")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TAB 6 — Calibration
 # ═══════════════════════════════════════════════════════════════════════════
 with tab_calib:
     st.subheader("Calibrate VG Parameters to Market Prices")
@@ -691,6 +855,15 @@ with tab_calib:
         "`type` (call / put).  "
         "Optionally include an `r` column; otherwise the sidebar value is used."
     )
+    st.markdown(
+        "> **Why is a `price` column required?** Calibration works by finding "
+        "the VG parameters ($\\sigma$, $\\nu$, $\\theta$) that minimise the sum of "
+        "squared errors (SSE) between the **model** prices and the **market** "
+        "prices you supply.  Without observed market prices the optimiser has "
+        "no target to fit against — the `price` column *is* the calibration "
+        "target.  If you only have implied-volatility data, convert it to "
+        "prices first using a Black-Scholes pricer and upload those."
+    )
 
     uploaded = st.file_uploader("Upload market data (.xlsx)", type=["xlsx"])
 
@@ -698,7 +871,7 @@ with tab_calib:
         df_raw = pd.read_excel(uploaded)
         df_raw.columns = [c.strip().lower() for c in df_raw.columns]
         st.markdown("**Uploaded data preview:**")
-        st.dataframe(df_raw.head(20), use_container_width=True)
+        st.dataframe(df_raw.head(20), width="stretch")
 
         required = {"k", "t", "price", "type"}
         if not required.issubset(set(df_raw.columns)):
@@ -734,7 +907,7 @@ with tab_calib:
             residuals = prices_mkt - model_prices
             moneyness_cal = S_cal / K_mkt
 
-            st.session_state["tab4"] = {
+            st.session_state["tab_cal"] = {
                 "cal_sigma": cal_model.sigma,
                 "cal_nu": cal_model.nu,
                 "cal_theta": cal_model.theta,
@@ -750,8 +923,8 @@ with tab_calib:
                 "S_cal": S_cal,
             }
 
-        if "tab4" in st.session_state:
-            _t4 = st.session_state["tab4"]
+        if "tab_cal" in st.session_state:
+            _t4 = st.session_state["tab_cal"]
 
             st.success("Calibration complete!")
             p1, p2, p3 = st.columns(3)
@@ -770,7 +943,7 @@ with tab_calib:
                 "Model Price": np.round(_t4["model_prices"], 6),
                 "Residual": np.round(_t4["residuals"], 6),
             })
-            st.dataframe(df_result, use_container_width=True)
+            st.dataframe(df_result, width="stretch")
 
             st.markdown("<br>", unsafe_allow_html=True)
 
@@ -782,7 +955,7 @@ with tab_calib:
             fig_res.update_layout(title="Calibration Residuals (Market - Model)",
                                   xaxis_title="Option #", yaxis_title="Residual",
                                   height=350, margin=PLOT_MARGIN)
-            st.plotly_chart(fig_res, use_container_width=True)
+            st.plotly_chart(fig_res, width="stretch")
 
             st.markdown("<br>", unsafe_allow_html=True)
 
@@ -796,7 +969,7 @@ with tab_calib:
             fig_fit.update_layout(title="Model vs Market Prices",
                                   xaxis_title="Market Price", yaxis_title="Model Price",
                                   height=400, margin=PLOT_MARGIN)
-            st.plotly_chart(fig_fit, use_container_width=True)
+            st.plotly_chart(fig_fit, width="stretch")
 
             st.markdown("<br>", unsafe_allow_html=True)
 
@@ -822,4 +995,307 @@ with tab_calib:
                 fig_smile.update_layout(title="Market vs Model Prices by Expiry",
                                         xaxis_title="Moneyness (S/K)", yaxis_title="Price",
                                         height=450, margin=PLOT_MARGIN)
-                st.plotly_chart(fig_smile, use_container_width=True)
+                st.plotly_chart(fig_smile, width="stretch")
+
+# ═══════════════════════════════════════════════════════════════════════════
+# TAB 7 — Method Explanations
+# ═══════════════════════════════════════════════════════════════════════════
+with tab_explain:
+    st.subheader("Method Explanations")
+    st.caption(
+        "Each pricing method is explained below with its key formulas and "
+        "simplified pseudo code showing how it is implemented in this application."
+    )
+
+    # ── Damping Parameter ────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### Damping Parameter ($\\alpha$)")
+    st.markdown(
+        "The raw Fourier transform of the call price $C(K)$ does not converge "
+        "because $C(K) \\to S$ as $K \\to 0$, so it is not in $L^1$.  "
+        "Carr & Madan (1999) fix this by multiplying by $e^{\\alpha k}$ "
+        "(where $k = \\ln K$), producing a *dampened* call price that **is** "
+        "square-integrable and therefore has a well-defined Fourier transform."
+    )
+    st.latex(
+        r"c_T(k) = e^{\alpha k}\, C(e^k)"
+        r"\quad\Longrightarrow\quad"
+        r"\hat c_T(u) = \int_{-\infty}^{\infty} e^{iuk}\, c_T(k)\, dk"
+        r"\quad\text{converges for } \alpha > 0"
+    )
+    st.markdown(
+        "The standard choice $\\alpha = 1.5$ balances convergence speed "
+        "against numerical noise.  Smaller values cause oscillation; "
+        "larger values amplify rounding errors at extreme strikes.  "
+        "The parameter is adjustable in the sidebar."
+    )
+
+    # ── VG Process ───────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### The Variance Gamma Process")
+    st.markdown(
+        "The VG process models the log-return of the asset as a Brownian "
+        "motion evaluated at a random (gamma-distributed) time.  "
+        "Under the risk-neutral measure:"
+    )
+    st.latex(
+        r"\ln\!\frac{S_T}{S_0} = (r - q + \omega)\,T + \theta\,G_T + \sigma\,W_{G_T}"
+    )
+    st.markdown("where $G_T \\sim \\text{Gamma}(T/\\nu,\\, \\nu)$ and the "
+                "martingale correction is:")
+    st.latex(
+        r"\omega = \frac{1}{\nu}\,\ln\!\bigl(1 - \theta\,\nu - \tfrac{1}{2}\sigma^2\nu\bigr)"
+    )
+    st.markdown(
+        "**Parameters:**\n"
+        "- $\\sigma$ — volatility of the Brownian motion component\n"
+        "- $\\nu$ — variance rate of the gamma subordinator (controls kurtosis)\n"
+        "- $\\theta$ — drift of the BM component (controls skewness)"
+    )
+    st.markdown("The characteristic function of $\\ln S_T$ is:")
+    st.latex(
+        r"\varphi(u) = e^{iu[\ln S_0 + (r-q+\omega)T]}"
+        r"\;\Bigl(1 - iu\,\theta\,\nu + \tfrac{1}{2}\sigma^2\nu\,u^2\Bigr)^{-T/\nu}"
+    )
+
+    # ── FFT Method ───────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 1. FFT — Carr-Madan (1999)")
+    st.markdown(
+        "The standard Fourier approach.  The dampened call price is recovered "
+        "by inverting its Fourier transform on a uniform grid, using the FFT "
+        "for $O(N \\log N)$ efficiency."
+    )
+    st.latex(
+        r"C(K) = \frac{e^{-\alpha k}}{\pi}"
+        r"\int_0^\infty e^{-iuk}\,\Psi(u)\,du"
+    )
+    st.markdown("where the modified characteristic function is:")
+    st.latex(
+        r"\Psi(u) = \frac{e^{-rT}\,\varphi\bigl(u - (\alpha+1)i\bigr)}"
+        r"{\alpha^2 + \alpha - u^2 + i(2\alpha+1)u}"
+    )
+    st.markdown("**Key constraint:** the frequency spacing $\\eta$ and "
+                "log-strike spacing $\\lambda$ are *coupled*: "
+                "$\\lambda \\cdot \\eta = 2\\pi / N$.")
+    st.markdown("**Pseudo code:**")
+    st.code("""
+def fft_price(K, T, alpha, eta, N):
+    lam = 2*pi / (N * eta)
+    b   = N * lam / 2
+
+    u = [0, eta, 2*eta, ..., (N-1)*eta]
+    w = simpson_weights(N)
+
+    # Evaluate modified char fn at each grid point
+    psi = carr_madan_psi(u, T, alpha)
+
+    # Build FFT input with shift factor
+    x = exp(i*b*u) * psi * eta * w
+
+    # Single FFT call
+    fft_result = FFT(x)
+
+    # Recover call prices on log-strike grid
+    k = [-b, -b+lam, ..., -b+(N-1)*lam]
+    call_prices = Re[ exp(-alpha*k) / pi * fft_result ]
+
+    # Interpolate to desired strike
+    return interp(log(K), k, call_prices)
+""", language="python")
+
+    # ── FRFT Method ──────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 2. FRFT — Chourdakis (2005)")
+    st.markdown(
+        "The *Fractional* FFT decouples $\\eta$ and $\\lambda$ via the "
+        "Bluestein chirp-z decomposition.  This lets you independently "
+        "control the frequency resolution and the strike grid density.  "
+        "The cost is three FFTs of size $2N$ instead of one FFT of size $N$."
+    )
+    st.markdown(
+        "The fractional parameter $\\beta = \\lambda\\eta / (2\\pi)$ replaces the "
+        "standard DFT kernel $e^{-2\\pi i jk/N}$ with "
+        "$e^{-2\\pi i jk\\beta}$."
+    )
+    st.markdown("**Why use it?**  When the FFT's coupled grid is too coarse "
+                "for accurate interpolation at your target strikes, the FRFT "
+                "provides a finer strike grid without increasing $N$.")
+    st.markdown("**Pseudo code:**")
+    st.code("""
+def frft(x, beta):
+    \"\"\"Fractional FFT via Bluestein chirp-z.\"\"\"
+    N = len(x)
+    M = next_power_of_2(2*N)
+
+    chirp = exp(-i*pi*beta * [0,1,4,9,...,(N-1)^2])
+
+    a = zero_pad(x * chirp, M)
+    b = zero_pad(exp(+i*pi*beta * [0,1,4,...]), M)
+    b[M-N+1:] = reversed(b[1:N])      # wrap-around
+
+    c = IFFT( FFT(a) * FFT(b) )       # 3 FFTs
+    return c[:N] * chirp
+
+def frft_price(K, T, alpha, eta, lam, N):
+    beta = lam * eta / (2*pi)
+    b    = N * lam / 2
+    u    = [0, eta, ..., (N-1)*eta]
+    w    = simpson_weights(N)
+    psi  = carr_madan_psi(u, T, alpha)
+    x    = exp(i*b*u) * psi * eta * w
+
+    fft_result = frft(x, beta)         # fractional FFT
+
+    k = [-b, -b+lam, ..., -b+(N-1)*lam]
+    call_prices = Re[ exp(-alpha*k) / pi * fft_result ]
+    return interp(log(K), k, call_prices)
+""", language="python")
+
+    # ── COS Method ───────────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 3. COS Method — Fang & Oosterlee (2008)")
+    st.markdown(
+        "Expands the risk-neutral density of the log-return $Z = \\ln(S_T/S_0)$ "
+        "as a truncated cosine series on an interval $[a, b]$ derived from "
+        "the VG cumulants.  Option prices follow analytically from the "
+        "payoff's cosine coefficients."
+    )
+    st.latex(
+        r"C(K) \approx e^{-rT} \sum_{k=0}^{N_{\cos}-1}"
+        r"\,' \operatorname{Re}\!\bigl[\varphi_Z(u_k)\,e^{-iu_k a}\bigr]"
+        r"\; V_k"
+    )
+    st.markdown("where $u_k = k\\pi/(b-a)$, the prime means the $k=0$ term "
+                "is halved, and $V_k$ are the analytical payoff coefficients:")
+    st.latex(
+        r"V_k^{\text{call}} = \frac{2}{b-a}\,K\,"
+        r"\bigl[e^x\,\chi_k(c, b) - \psi_k(c, b)\bigr]"
+        r"\qquad x = \ln(S/K)"
+    )
+    st.markdown(
+        "The helper integrals $\\chi_k$ (exponential cosine) and $\\psi_k$ "
+        "(plain cosine) have closed-form expressions."
+    )
+    st.markdown(
+        "**Truncation range** $[a, b]$ is computed from the first four "
+        "cumulants of the log-return, scaled by the parameter $L$:"
+    )
+    st.latex(
+        r"[a,b] = \bigl[c_1 - L\sqrt{|c_2| + \sqrt{|c_4|}}\,,\;"
+        r"c_1 + L\sqrt{|c_2| + \sqrt{|c_4|}}\bigr]"
+    )
+    st.markdown("**Pseudo code:**")
+    st.code("""
+def cos_price(K, T, option_type, N_cos, L):
+    # 1. Truncation range from VG cumulants
+    a, b = cos_truncation(T, L)
+
+    # 2. Cosine frequencies
+    u_k = k * pi / (b - a)    for k = 0..N_cos-1
+
+    # 3. Density expansion coefficients (strike-independent)
+    F_k = Re[ phi_Z(u_k) * exp(-i*u_k*a) ]
+    F_k[0] *= 0.5             # halve k=0 term
+
+    # 4. For each strike K:
+    x = log(S / K)             # log-moneyness
+    c_lo = max(a, -x)
+
+    if call:
+        chi_k = integral_exp_cos(k, a, b, c_lo, b)
+        psi_k = integral_cos(k, a, b, c_lo, b)
+        V_k = (2/(b-a)) * K * (exp(x)*chi_k - psi_k)
+    else:
+        c_hi = min(b, -x)
+        chi_k = integral_exp_cos(k, a, b, a, c_hi)
+        psi_k = integral_cos(k, a, b, a, c_hi)
+        V_k = (2/(b-a)) * K * (-exp(x)*chi_k + psi_k)
+
+    price = exp(-r*T) * sum(F_k * V_k)
+    return price
+""", language="python")
+
+    # ── Arbitrary Precision ──────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 4. Arbitrary Precision — mpmath Quadrature")
+    st.markdown(
+        "Direct numerical integration of the pricing integrals using "
+        "mpmath's adaptive Gauss-Legendre quadrature at user-selectable "
+        "decimal precision.  This is the *slowest* method but produces "
+        "a high-accuracy reference for validating the FFT / FRFT / COS "
+        "results."
+    )
+    st.markdown("The call price is decomposed as:")
+    st.latex(
+        r"C = S\,e^{-qT}\,\Pi_1 - K\,e^{-rT}\,\Pi_2"
+    )
+    st.markdown("where $\\Pi_1$ and $\\Pi_2$ are Gil-Pelaez style integrals "
+                "of the characteristic function:")
+    st.latex(
+        r"\Pi_j = \frac{1}{2} + \frac{1}{\pi}"
+        r"\int_0^\infty \operatorname{Re}\!\Bigl["
+        r"\frac{e^{-iu\ln K}\,\varphi_j(u)}{iu}\Bigr]\,du"
+    )
+    st.markdown(
+        "Delta and gamma are computed analytically via differentiation "
+        "of the integrand; all other Greeks use central finite differences "
+        "at arbitrary precision (bump size $\\varepsilon \\approx 10^{-10}$ "
+        "to $10^{-20}$)."
+    )
+    st.markdown("**Pseudo code:**")
+    st.code("""
+def arb_price(S, r, q, sigma, theta, nu, T, K, dps):
+    set_precision(dps)         # e.g. 50 decimal places
+
+    # Gil-Pelaez integrals via adaptive quadrature
+    pi_1 = 0.5 + (1/pi) * quad(pi1_integrand, [0, inf])
+    pi_2 = 0.5 + (1/pi) * quad(pi2_integrand, [0, inf])
+
+    call = S * exp(-q*T) * pi_1 - K * exp(-r*T) * pi_2
+    delta = exp(-q*T) * pi_1   # analytical
+    gamma = quad(gamma_integrand, [0, inf])  # analytical
+
+    # Other Greeks via central finite differences
+    theta_greek = (price(T+eps) - price(T-eps)) / (2*eps)
+    vega        = (price(sigma+eps) - price(sigma-eps)) / (2*eps)
+    # ... similarly for rho, d/d_theta, d/d_nu
+
+    return call, delta, gamma, theta_greek, vega, ...
+""", language="python")
+
+    # ── Autodiff Greeks ──────────────────────────────────────────────
+    st.markdown("---")
+    st.markdown("### 5. Autodiff Greeks — PyTorch")
+    st.markdown(
+        "When PyTorch is installed, the FFT pricing formula is re-implemented "
+        "using torch tensors so that `torch.autograd.grad` can compute exact "
+        "gradients (delta, gamma, vega, rho, theta, and VG sensitivities) "
+        "in a single backward pass.  This runs on GPU if CUDA is available."
+    )
+    st.markdown("**Pseudo code:**")
+    st.code("""
+def greeks_autodiff(S, r, q, sigma, nu, theta, K, T):
+    # Build differentiable tensors (requires_grad=True)
+    S_t, r_t, sigma_t, nu_t, theta_t, T_t = ...
+
+    # Forward: Carr-Madan FFT in pure torch
+    call = torch_fft_price(S_t, r_t, ..., K, T_t)
+
+    # Backward: automatic differentiation
+    delta, rho, vega, d_nu, d_theta, theta_greek = \\
+        autograd.grad(call, [S_t, r_t, sigma_t, nu_t, theta_t, T_t],
+                      create_graph=True)
+
+    gamma = autograd.grad(delta, S_t)   # 2nd order
+
+    return {delta, gamma, theta, vega, rho, d_theta, d_nu}
+""", language="python")
+
+    st.markdown("---")
+    st.markdown(
+        "*All methods share the same VG characteristic function and model "
+        "parameters; they differ only in how the pricing integral is evaluated.  "
+        "FFT and FRFT work in Fourier space, COS uses cosine-series expansion, "
+        "and Arbitrary Precision performs direct quadrature.*"
+    )

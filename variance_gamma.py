@@ -366,6 +366,177 @@ class VarianceGammaModel:
         return self._interp(K, k_grid, vals)
 
     # ------------------------------------------------------------------
+    # FRFT (Fractional FFT) pricer — Chourdakis (2005)
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _frft(x, alpha_frac):
+        """Fractional FFT via Bluestein chirp-z decomposition.
+
+        Computes  Y_k = sum_j x_j exp(-2*pi*i*j*k*alpha_frac)
+        for k = 0..N-1.  When alpha_frac = 1/N this is the standard DFT.
+        Cost: three standard FFTs of length 2N (zero-padded to power of 2).
+        """
+        N = len(x)
+        M = 1
+        while M < 2 * N:
+            M <<= 1
+
+        chirp = np.exp(-1j * np.pi * alpha_frac * np.arange(N) ** 2)
+        a_arr = np.zeros(M, dtype=complex)
+        a_arr[:N] = x * chirp
+
+        b_arr = np.zeros(M, dtype=complex)
+        b_vals = np.exp(1j * np.pi * alpha_frac * np.arange(N) ** 2)
+        b_arr[:N] = b_vals
+        b_arr[M - N + 1:] = b_vals[N - 1:0:-1]
+
+        c_arr = np.fft.ifft(np.fft.fft(a_arr) * np.fft.fft(b_arr))
+        return c_arr[:N] * chirp
+
+    def price_frft(self, K, T: float, option_type: str = "call",
+                   N: int = 4096, alpha: float = 1.5, eta: float = 0.25,
+                   lam: float = None):
+        """Price European call or put via Fractional FFT (Chourdakis 2005).
+
+        The FRFT decouples the frequency spacing *eta* from the log-strike
+        spacing *lam* via the Bluestein chirp-z trick.  Standard FFT forces
+        lam * eta = 2*pi/N; FRFT lifts that constraint so both grids can
+        be tuned independently for accuracy.
+
+        Parameters
+        ----------
+        lam : float or None – log-strike spacing.  If None, uses the same
+              default as FFT: 2*pi/(N*eta).  Pass a smaller value to get a
+              finer strike grid.
+        """
+        if lam is None:
+            lam = 2.0 * np.pi / (N * eta)
+        b = N * lam / 2.0
+        beta = lam * eta / (2.0 * np.pi)   # fractional parameter
+
+        j = np.arange(N)
+        u = j * eta
+
+        sw = self._simpson_weights(N)
+        psi = self._carr_madan_psi(u, T, alpha)
+
+        x = np.exp(1j * b * u) * psi * eta * sw
+        fft_result = self._frft(x, beta)
+
+        k = -b + lam * j
+        call_prices = np.real(np.exp(-alpha * k) / np.pi * fft_result)
+
+        K = np.atleast_1d(np.asarray(K, dtype=float))
+        log_K = np.log(K)
+        prices = np.interp(log_K, k, call_prices)
+
+        if option_type.lower() == "put":
+            prices = prices - self.S * np.exp(-self.q * T) + K * np.exp(-self.r * T)
+
+        return float(prices[0]) if prices.size == 1 else prices
+
+    # ------------------------------------------------------------------
+    # COS method — Fang & Oosterlee (2008)
+    # ------------------------------------------------------------------
+
+    def _cos_truncation(self, T: float, L: float = 10.0):
+        """Compute [a, b] truncation range from VG cumulants of the log-return."""
+        w = self.omega()
+        c1 = (self.r - self.q + w) * T
+        c2 = (self.sigma ** 2 + self.nu * self.theta ** 2) * T
+        c4 = 3.0 * (self.sigma ** 4) * self.nu * T
+        spread = L * np.sqrt(abs(c2) + np.sqrt(abs(c4)))
+        return c1 - spread, c1 + spread
+
+    def _char_fn_log_return(self, u, T: float):
+        """Characteristic function of the log-return Z = ln(S_T / S_0)."""
+        w = self.omega()
+        drift = 1j * u * (self.r - self.q + w) * T
+        vg_exp = -(T / self.nu) * np.log(
+            1.0 - 1j * u * self.theta * self.nu
+            + 0.5 * self.sigma ** 2 * self.nu * u ** 2
+        )
+        return np.exp(drift + vg_exp)
+
+    def price_cos(self, K, T: float, option_type: str = "call",
+                  N_cos: int = 256, L: float = 10.0):
+        """Price European call or put via the COS method (Fang & Oosterlee 2008).
+
+        Expands the risk-neutral density of the log-return in a cosine
+        series on a truncated interval [a, b] and recovers option prices
+        analytically from the payoff's Fourier-cosine coefficients.
+
+        Works entirely in z-space (z = ln(S_T/S_0), the log-return).
+
+        Parameters
+        ----------
+        N_cos : int  – number of cosine expansion terms (default 256)
+        L     : float – truncation width in cumulant-scaled std devs
+        """
+        K = np.atleast_1d(np.asarray(K, dtype=float))
+        a, b_cos = self._cos_truncation(T, L)
+        bma = b_cos - a
+
+        k = np.arange(N_cos)
+        u_k = k * np.pi / bma
+
+        # Characteristic function of the log-return Z = ln(S_T/S_0)
+        phi_Z = self._char_fn_log_return(u_k, T)
+
+        # Density expansion coefficients (strike-independent)
+        F_k = np.real(phi_Z * np.exp(-1j * u_k * a))
+        F_k[0] *= 0.5   # halve the k=0 term
+
+        prices = np.zeros(len(K))
+        for idx, K_val in enumerate(K):
+            x = np.log(self.S / K_val)   # log-moneyness
+
+            # Call payoff in z-space: max(S*e^z - K, 0) = K*max(e^{x+z} - 1, 0)
+            # positive when z > -x = ln(K/S)
+            c_lo = max(a, -x)  # lower integration bound
+
+            if option_type.lower() == "call":
+                chi_k = self._cos_chi(k, a, b_cos, c_lo, b_cos)
+                psi_k = self._cos_psi(k, a, b_cos, c_lo, b_cos)
+                # V_k includes factor (2/(b-a))*K*[e^x * chi_k - psi_k]
+                V_k = (2.0 / bma) * K_val * (np.exp(x) * chi_k - psi_k)
+            else:
+                c_hi = min(b_cos, -x)  # upper integration bound for put
+                chi_k = self._cos_chi(k, a, b_cos, a, c_hi)
+                psi_k = self._cos_psi(k, a, b_cos, a, c_hi)
+                V_k = (2.0 / bma) * K_val * (-np.exp(x) * chi_k + psi_k)
+
+            prices[idx] = np.exp(-self.r * T) * np.sum(F_k * V_k)
+
+        return float(prices[0]) if prices.size == 1 else prices
+
+    @staticmethod
+    def _cos_chi(k, a, b_cos, c, d):
+        """chi_k = integral_c^d exp(y) cos(k*pi*(y-a)/(b-a)) dy."""
+        bma = b_cos - a
+        u_k = k * np.pi / bma
+        denom = 1.0 + u_k ** 2
+        chi = (1.0 / denom) * (
+            np.cos(u_k * (d - a)) * np.exp(d)
+            - np.cos(u_k * (c - a)) * np.exp(c)
+            + u_k * np.sin(u_k * (d - a)) * np.exp(d)
+            - u_k * np.sin(u_k * (c - a)) * np.exp(c)
+        )
+        return chi
+
+    @staticmethod
+    def _cos_psi(k, a, b_cos, c, d):
+        """psi_k = integral_c^d cos(k*pi*(y-a)/(b-a)) dy."""
+        bma = b_cos - a
+        psi = np.zeros_like(k, dtype=float)
+        psi[0] = d - c
+        if len(k) > 1:
+            u_k = k[1:] * np.pi / bma
+            psi[1:] = (np.sin(u_k * (d - a)) - np.sin(u_k * (c - a))) / u_k
+        return psi
+
+    # ------------------------------------------------------------------
     # Convenience: all Greeks at once
     # ------------------------------------------------------------------
 
@@ -536,6 +707,267 @@ class VarianceGammaModel:
             "rho": rho_out,
             "d_theta_param": dtheta_param_val.item(),
             "d_nu": dnu_val.item(),
+        }
+
+    # ------------------------------------------------------------------
+    # GPU-accelerated FRFT via PyTorch
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _torch_frft(x, alpha_frac):
+        """Fractional FFT via Bluestein chirp-z, implemented in PyTorch.
+
+        Works on CPU or CUDA depending on the device of *x*.
+        """
+        N = x.shape[0]
+        M = 1
+        while M < 2 * N:
+            M <<= 1
+
+        idx = torch.arange(N, dtype=torch.float64, device=x.device)
+        chirp = torch.exp(torch.complex(
+            torch.zeros(N, dtype=torch.float64, device=x.device),
+            -np.pi * alpha_frac * idx ** 2,
+        ))
+
+        a_arr = torch.zeros(M, dtype=torch.complex128, device=x.device)
+        a_arr[:N] = x * chirp
+
+        b_vals = torch.exp(torch.complex(
+            torch.zeros(N, dtype=torch.float64, device=x.device),
+            np.pi * alpha_frac * idx ** 2,
+        ))
+        b_arr = torch.zeros(M, dtype=torch.complex128, device=x.device)
+        b_arr[:N] = b_vals
+        b_arr[M - N + 1:] = b_vals.flip(0)[:-1]
+
+        c_arr = torch.fft.ifft(torch.fft.fft(a_arr) * torch.fft.fft(b_arr))
+        return c_arr[:N] * chirp
+
+    @staticmethod
+    def _torch_price_frft(S, r, q, sigma, nu, theta_vg, K_val, T_val,
+                          N=4096, alpha=1.5, eta=0.25, lam=None):
+        """FRFT call price built entirely from torch ops (GPU-capable).
+
+        All of S, r, q, sigma, nu, theta_vg, K_val, T_val may be
+        torch tensors with requires_grad=True.
+        """
+        dev = S.device
+        if lam is None:
+            lam = 2.0 * np.pi / (N * eta)
+        b = N * lam / 2.0
+        beta = lam * eta / (2.0 * np.pi)
+
+        j = torch.arange(N, dtype=torch.float64, device=dev)
+        u_real = j * eta
+
+        sw = VarianceGammaModel._torch_simpson_weights(N, device=dev)
+
+        # Characteristic function at v = u - (alpha+1)i
+        v_real = u_real
+        v_imag = -(alpha + 1.0) * torch.ones(N, dtype=torch.float64, device=dev)
+        v = torch.complex(v_real, v_imag)
+
+        w = (1.0 / nu) * torch.log(
+            1.0 - theta_vg * nu - 0.5 * sigma ** 2 * nu
+        )
+        x_log = torch.log(S)
+        drift = 1j * v * (x_log + (r - q + w) * T_val)
+        vg_inner = (1.0 - 1j * v * theta_vg * nu
+                    + 0.5 * sigma ** 2 * nu * v ** 2)
+        vg_exp = -(T_val / nu) * torch.log(vg_inner)
+        phi = torch.exp(drift + vg_exp)
+
+        u_cpx = torch.complex(u_real, torch.zeros(N, dtype=torch.float64, device=dev))
+        denom = (alpha ** 2 + alpha - u_cpx ** 2
+                 + 1j * (2.0 * alpha + 1.0) * u_cpx)
+        psi = torch.exp(-r * T_val) * phi / denom
+
+        shift = torch.exp(torch.complex(
+            torch.zeros(N, dtype=torch.float64, device=dev),
+            b * u_real,
+        ))
+        fft_in = shift * psi * eta * sw
+        fft_out = VarianceGammaModel._torch_frft(fft_in, beta)
+
+        k_grid = -b + lam * j
+        call_grid = (torch.exp(-alpha * k_grid) / np.pi) * fft_out.real
+
+        log_K = torch.log(K_val)
+        idx = torch.searchsorted(k_grid.cpu(), log_K.detach().cpu()).clamp(1, N - 1).to(dev)
+        k_lo = k_grid[idx - 1]
+        k_hi = k_grid[idx]
+        c_lo = call_grid[idx - 1]
+        c_hi = call_grid[idx]
+        frac = (log_K - k_lo) / (k_hi - k_lo)
+        return c_lo + frac * (c_hi - c_lo)
+
+    # ------------------------------------------------------------------
+    # GPU-accelerated COS method via PyTorch
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _torch_cos_chi(k, a, b_cos, c, d):
+        """chi_k in PyTorch."""
+        bma = b_cos - a
+        u_k = k * np.pi / bma
+        denom = 1.0 + u_k ** 2
+        chi = (1.0 / denom) * (
+            torch.cos(u_k * (d - a)) * torch.exp(d)
+            - torch.cos(u_k * (c - a)) * torch.exp(c)
+            + u_k * torch.sin(u_k * (d - a)) * torch.exp(d)
+            - u_k * torch.sin(u_k * (c - a)) * torch.exp(c)
+        )
+        return chi
+
+    @staticmethod
+    def _torch_cos_psi(k, a, b_cos, c, d):
+        """psi_k in PyTorch."""
+        bma = b_cos - a
+        psi = torch.zeros_like(k, dtype=torch.float64)
+        psi[0] = d - c
+        if k.shape[0] > 1:
+            u_k = k[1:] * np.pi / bma
+            psi[1:] = (torch.sin(u_k * (d - a)) - torch.sin(u_k * (c - a))) / u_k
+        return psi
+
+    @staticmethod
+    def _torch_price_cos(S, r, q, sigma, nu, theta_vg, K_val, T_val,
+                         N_cos=256, L=10.0):
+        """COS method call price built entirely from torch ops (GPU-capable).
+
+        All of S, r, q, sigma, nu, theta_vg, K_val, T_val may be
+        torch tensors with requires_grad=True.
+        """
+        dev = S.device
+
+        # Martingale correction
+        w = (1.0 / nu) * torch.log(
+            1.0 - theta_vg * nu - 0.5 * sigma ** 2 * nu
+        )
+
+        # Cumulant-based truncation
+        c1 = (r - q + w) * T_val
+        c2 = (sigma ** 2 + nu * theta_vg ** 2) * T_val
+        c4 = 3.0 * (sigma ** 4) * nu * T_val
+        spread = L * torch.sqrt(torch.abs(c2) + torch.sqrt(torch.abs(c4)))
+        a = c1 - spread
+        b_cos = c1 + spread
+        bma = b_cos - a
+
+        k = torch.arange(N_cos, dtype=torch.float64, device=dev)
+        u_k = k * np.pi / bma
+
+        # Characteristic function of log-return
+        u_cpx = torch.complex(u_k, torch.zeros(N_cos, dtype=torch.float64, device=dev))
+        drift = 1j * u_cpx * (r - q + w) * T_val
+        vg_inner = (1.0 - 1j * u_cpx * theta_vg * nu
+                    + 0.5 * sigma ** 2 * nu * u_cpx ** 2)
+        vg_exp = -(T_val / nu) * torch.log(vg_inner)
+        phi_Z = torch.exp(drift + vg_exp)
+
+        F_k = (phi_Z * torch.exp(torch.complex(
+            torch.zeros(N_cos, dtype=torch.float64, device=dev),
+            -u_k * a,
+        ))).real
+        F_k[0] = F_k[0] * 0.5
+
+        x = torch.log(S / K_val)
+        c_lo = torch.where(-x > a, -x, a)
+
+        chi_k = VarianceGammaModel._torch_cos_chi(k, a, b_cos, c_lo, b_cos)
+        psi_k = VarianceGammaModel._torch_cos_psi(k, a, b_cos, c_lo, b_cos)
+        V_k = (2.0 / bma) * K_val * (torch.exp(x) * chi_k - psi_k)
+
+        return torch.exp(-r * T_val) * torch.sum(F_k * V_k)
+
+    def greeks_ad_frft(self, K, T: float, option_type: str = "call",
+                       N: int = 4096, alpha: float = 1.5, eta: float = 0.25,
+                       lam: float = None):
+        """Compute all Greeks via PyTorch autodiff using the FRFT method."""
+        if not _HAS_TORCH:
+            raise ImportError("PyTorch is required for greeks_ad_frft()")
+
+        dev = _TORCH_DEVICE
+        S_t = torch.tensor(self.S, dtype=torch.float64, device=dev, requires_grad=True)
+        r_t = torch.tensor(self.r, dtype=torch.float64, device=dev, requires_grad=True)
+        q_t = torch.tensor(self.q, dtype=torch.float64, device=dev, requires_grad=True)
+        sigma_t = torch.tensor(self.sigma, dtype=torch.float64, device=dev, requires_grad=True)
+        nu_t = torch.tensor(self.nu, dtype=torch.float64, device=dev, requires_grad=True)
+        theta_t = torch.tensor(self.theta, dtype=torch.float64, device=dev, requires_grad=True)
+        T_t = torch.tensor(T, dtype=torch.float64, device=dev, requires_grad=True)
+        K_t = torch.tensor(float(K), dtype=torch.float64, device=dev)
+
+        call = self._torch_price_frft(
+            S_t, r_t, q_t, sigma_t, nu_t, theta_t, K_t, T_t, N, alpha, eta, lam
+        )
+
+        grads = torch.autograd.grad(
+            call, [S_t, r_t, sigma_t, nu_t, theta_t, T_t],
+            create_graph=True
+        )
+        delta_call = grads[0]
+        gamma_val = torch.autograd.grad(delta_call, S_t)[0]
+
+        if option_type.lower() == "put":
+            price_val = call.item() - self.S * np.exp(-self.q * T) + float(K) * np.exp(-self.r * T)
+            delta_out = delta_call.item() - np.exp(-self.q * T)
+            theta_out = grads[5].item() + self.q * self.S * np.exp(-self.q * T) - self.r * float(K) * np.exp(-self.r * T)
+            rho_out = grads[1].item() - float(K) * T * np.exp(-self.r * T)
+        else:
+            price_val = call.item()
+            delta_out = delta_call.item()
+            theta_out = grads[5].item()
+            rho_out = grads[1].item()
+
+        return {
+            "price": price_val, "delta": delta_out, "gamma": gamma_val.item(),
+            "theta": theta_out, "vega": grads[2].item(), "rho": rho_out,
+            "d_theta_param": grads[4].item(), "d_nu": grads[3].item(),
+        }
+
+    def greeks_ad_cos(self, K, T: float, option_type: str = "call",
+                      N_cos: int = 256, L: float = 10.0):
+        """Compute all Greeks via PyTorch autodiff using the COS method."""
+        if not _HAS_TORCH:
+            raise ImportError("PyTorch is required for greeks_ad_cos()")
+
+        dev = _TORCH_DEVICE
+        S_t = torch.tensor(self.S, dtype=torch.float64, device=dev, requires_grad=True)
+        r_t = torch.tensor(self.r, dtype=torch.float64, device=dev, requires_grad=True)
+        q_t = torch.tensor(self.q, dtype=torch.float64, device=dev, requires_grad=True)
+        sigma_t = torch.tensor(self.sigma, dtype=torch.float64, device=dev, requires_grad=True)
+        nu_t = torch.tensor(self.nu, dtype=torch.float64, device=dev, requires_grad=True)
+        theta_t = torch.tensor(self.theta, dtype=torch.float64, device=dev, requires_grad=True)
+        T_t = torch.tensor(T, dtype=torch.float64, device=dev, requires_grad=True)
+        K_t = torch.tensor(float(K), dtype=torch.float64, device=dev)
+
+        call = self._torch_price_cos(
+            S_t, r_t, q_t, sigma_t, nu_t, theta_t, K_t, T_t, N_cos, L
+        )
+
+        grads = torch.autograd.grad(
+            call, [S_t, r_t, sigma_t, nu_t, theta_t, T_t],
+            create_graph=True
+        )
+        delta_call = grads[0]
+        gamma_val = torch.autograd.grad(delta_call, S_t)[0]
+
+        if option_type.lower() == "put":
+            price_val = call.item() - self.S * np.exp(-self.q * T) + float(K) * np.exp(-self.r * T)
+            delta_out = delta_call.item() - np.exp(-self.q * T)
+            theta_out = grads[5].item() + self.q * self.S * np.exp(-self.q * T) - self.r * float(K) * np.exp(-self.r * T)
+            rho_out = grads[1].item() - float(K) * T * np.exp(-self.r * T)
+        else:
+            price_val = call.item()
+            delta_out = delta_call.item()
+            theta_out = grads[5].item()
+            rho_out = grads[1].item()
+
+        return {
+            "price": price_val, "delta": delta_out, "gamma": gamma_val.item(),
+            "theta": theta_out, "vega": grads[2].item(), "rho": rho_out,
+            "d_theta_param": grads[4].item(), "d_nu": grads[3].item(),
         }
 
     # ------------------------------------------------------------------
