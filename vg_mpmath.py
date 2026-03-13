@@ -153,6 +153,77 @@ def fd_gamma(S_0, r, q, sigma, theta, nu, t, K, eps=1e-20):
     return mp.fdiv(mp.fsub(delta_up, delta_down), mp.fmul(2, eps))
 
 
+def fd_theta(S_0, r, q, sigma, theta, nu, t, K, eps=1e-10):
+    """Finite-difference theta: dC/dT."""
+    eps = mp.mpf(eps)
+    t_plus = mp.fadd(t, eps)
+    t_minus = mp.fsub(t, eps)
+    price_up, _, _, _, _, _ = call_price(S_0, r, q, sigma, theta, nu, float(t_plus), K)
+    price_down, _, _, _, _, _ = call_price(S_0, r, q, sigma, theta, nu, float(t_minus), K)
+    return mp.fdiv(mp.fsub(price_up, price_down), mp.fmul(2, eps))
+
+
+def fd_vega(S_0, r, q, sigma, theta, nu, t, K, eps=1e-10):
+    """Finite-difference vega: dC/d(sigma)."""
+    eps = mp.mpf(eps)
+    sig_plus = mp.fadd(sigma, eps)
+    sig_minus = mp.fsub(sigma, eps)
+    price_up, _, _, _, _, _ = call_price(S_0, r, q, float(sig_plus), theta, nu, t, K)
+    price_down, _, _, _, _, _ = call_price(S_0, r, q, float(sig_minus), theta, nu, t, K)
+    return mp.fdiv(mp.fsub(price_up, price_down), mp.fmul(2, eps))
+
+
+def fd_rho(S_0, r, q, sigma, theta, nu, t, K, eps=1e-10):
+    """Finite-difference rho: dC/dr."""
+    eps = mp.mpf(eps)
+    r_plus = mp.fadd(r, eps)
+    r_minus = mp.fsub(r, eps)
+    price_up, _, _, _, _, _ = call_price(S_0, float(r_plus), q, sigma, theta, nu, t, K)
+    price_down, _, _, _, _, _ = call_price(S_0, float(r_minus), q, sigma, theta, nu, t, K)
+    return mp.fdiv(mp.fsub(price_up, price_down), mp.fmul(2, eps))
+
+
+def fd_theta_param(S_0, r, q, sigma, theta, nu, t, K, eps=1e-10):
+    """Finite-difference sensitivity to VG theta parameter: dC/d(theta_VG)."""
+    eps = mp.mpf(eps)
+    th_plus = mp.fadd(theta, eps)
+    th_minus = mp.fsub(theta, eps)
+    price_up, _, _, _, _, _ = call_price(S_0, r, q, sigma, float(th_plus), nu, t, K)
+    price_down, _, _, _, _, _ = call_price(S_0, r, q, sigma, float(th_minus), nu, t, K)
+    return mp.fdiv(mp.fsub(price_up, price_down), mp.fmul(2, eps))
+
+
+def fd_nu(S_0, r, q, sigma, theta, nu, t, K, eps=1e-10):
+    """Finite-difference sensitivity to VG nu parameter: dC/d(nu)."""
+    eps = mp.mpf(eps)
+    nu_plus = mp.fadd(nu, eps)
+    nu_minus = mp.fsub(nu, eps)
+    price_up, _, _, _, _, _ = call_price(S_0, r, q, sigma, theta, float(nu_plus), t, K)
+    price_down, _, _, _, _, _ = call_price(S_0, r, q, sigma, theta, float(nu_minus), t, K)
+    return mp.fdiv(mp.fsub(price_up, price_down), mp.fmul(2, eps))
+
+
+def all_greeks(S_0, r, q, sigma, theta, nu, t, K):
+    """Compute price + all Greeks (analytical where available, FD otherwise).
+
+    Returns dict with: price, delta, gamma (analytical via quadrature),
+    fd_delta, fd_gamma, theta, vega, rho, d_theta_param, d_nu (all FD).
+    """
+    px, dlt, gma, e1, e2, e3 = call_price(S_0, r, q, sigma, theta, nu, t, K)
+    return {
+        "price": px,
+        "delta": dlt,
+        "gamma": gma,
+        "fd_delta": fd_delta(S_0, r, q, sigma, theta, nu, t, K),
+        "fd_gamma": fd_gamma(S_0, r, q, sigma, theta, nu, t, K),
+        "theta": fd_theta(S_0, r, q, sigma, theta, nu, t, K),
+        "vega": fd_vega(S_0, r, q, sigma, theta, nu, t, K),
+        "rho": fd_rho(S_0, r, q, sigma, theta, nu, t, K),
+        "d_theta_param": fd_theta_param(S_0, r, q, sigma, theta, nu, t, K),
+        "d_nu": fd_nu(S_0, r, q, sigma, theta, nu, t, K),
+    }
+
+
 # ── Quick self-test ──────────────────────────────────────────────────────
 
 if __name__ == "__main__":

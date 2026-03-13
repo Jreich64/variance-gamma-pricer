@@ -455,12 +455,74 @@ with tab_greeks:
 # TAB 4 — Arbitrary Precision 3D Surfaces (mpmath)
 # ═══════════════════════════════════════════════════════════════════════════
 with tab_arb:
-    st.subheader("Arbitrary Precision 3D Surfaces (mpmath)")
+    st.subheader("Arbitrary Precision (mpmath)")
     st.caption(
         "Uses mpmath adaptive quadrature (not FFT) with user-selectable decimal precision. "
-        "Computes call price, analytical delta, and analytical gamma. "
-        "**Much slower** than FFT — keep grid sizes small (≤ 15)."
+        "Analytical price, delta & gamma via quadrature; all other Greeks via "
+        "arbitrary-precision finite differences."
     )
+
+    # ── Single-point pricer ───────────────────────────────────────────
+    st.markdown("#### Single-Point Arbitrary Precision Pricer")
+    with st.form("arb_single_form"):
+        asc1, asc2, asc3, asc4 = st.columns(4)
+        arb_K_single = asc1.number_input("Strike (K)", value=100.0, min_value=0.01, step=1.0, format="%.2f", key="arb_K_single")
+        arb_T_single = asc2.number_input("Expiry (T)", value=0.5, min_value=0.01, step=0.05, format="%.4f", key="arb_T_single")
+        arb_opt_single = asc3.selectbox("Option Type", ["call", "put"], key="arb_opt_single")
+        arb_dps_single = int(asc4.number_input("Decimal places", value=50, min_value=10, max_value=500, step=10, key="arb_dps_single"))
+        submitted_arb_single = st.form_submit_button("Price (arbitrary precision)")
+
+    if submitted_arb_single:
+        vg_mpmath.set_precision(arb_dps_single)
+        t0_sp = time.perf_counter()
+        greeks_sp = vg_mpmath.all_greeks(S, r, q, sigma, theta_vg, nu, arb_T_single, arb_K_single)
+        t_sp = time.perf_counter() - t0_sp
+
+        # Put-call parity adjustments
+        if arb_opt_single == "put":
+            disc_S = float(S) * np.exp(-q * arb_T_single)
+            disc_K = float(arb_K_single) * np.exp(-r * arb_T_single)
+            greeks_sp["price"] = float(greeks_sp["price"]) - disc_S + disc_K
+            greeks_sp["delta"] = float(greeks_sp["delta"]) - np.exp(-q * arb_T_single)
+            greeks_sp["fd_delta"] = float(greeks_sp["fd_delta"]) - np.exp(-q * arb_T_single)
+            greeks_sp["theta"] = float(greeks_sp["theta"]) + q * disc_S - r * disc_K
+            greeks_sp["rho"] = float(greeks_sp["rho"]) - arb_K_single * arb_T_single * np.exp(-r * arb_T_single)
+
+        st.session_state["tab_arb_single"] = {
+            "greeks_sp": {k: str(v) for k, v in greeks_sp.items()},
+            "t_sp": t_sp,
+            "arb_dps_single": arb_dps_single,
+            "arb_opt_single": arb_opt_single,
+            "arb_K_single": arb_K_single,
+            "arb_T_single": arb_T_single,
+            "params_key": _sidebar_params_key(),
+        }
+
+    if "tab_arb_single" in st.session_state and st.session_state["tab_arb_single"]["params_key"] == _sidebar_params_key():
+        _tsp = st.session_state["tab_arb_single"]
+        st.metric("Computation Time", f"{_tsp['t_sp']:.2f} s")
+        st.info(f"Precision: **{_tsp['arb_dps_single']}** dps  |  "
+                f"K={_tsp['arb_K_single']}  T={_tsp['arb_T_single']}  "
+                f"Option: **{_tsp['arb_opt_single'].title()}**")
+
+        sp_nice = {
+            "price": "Price", "delta": "Delta (analytical)", "gamma": "Gamma (analytical)",
+            "fd_delta": "Delta (FD)", "fd_gamma": "Gamma (FD)",
+            "theta": "Theta (FD)", "vega": "Vega (FD)", "rho": "Rho (FD)",
+            "d_theta_param": "d/d(theta_VG) (FD)", "d_nu": "d/d(nu) (FD)",
+        }
+        rows_sp = []
+        for k in ["price", "delta", "gamma", "fd_delta", "fd_gamma",
+                   "theta", "vega", "rho", "d_theta_param", "d_nu"]:
+            rows_sp.append({"Greek": sp_nice[k], "Value": _tsp["greeks_sp"][k]})
+        st.dataframe(pd.DataFrame(rows_sp), hide_index=True, use_container_width=True)
+
+    st.markdown("---")
+
+    # ── 3D Surfaces ───────────────────────────────────────────────────
+    st.markdown("#### 3D Surfaces vs Moneyness & Expiry")
+    st.caption("**Much slower** than FFT — keep grid sizes small (≤ 15). "
+               "FD Greeks require extra pricing calls per grid point.")
 
     with st.form("arb_form"):
         ac1, ac2, ac3 = st.columns(3)
@@ -480,6 +542,9 @@ with tab_arb:
         arb_T_lo = at1.number_input("Min expiry (T)", value=0.1, min_value=0.01, step=0.05, format="%.2f", key="arb_tlo")
         arb_T_hi = at2.number_input("Max expiry (T)", value=1.5, min_value=0.05, step=0.1, format="%.2f", key="arb_thi")
 
+        arb_include_fd = st.checkbox("Include FD Greeks (theta, vega, rho, d/d_theta, d/d_nu) — much slower",
+                                     value=False, key="arb_include_fd")
+
         submitted_arb = st.form_submit_button("Compute Surfaces")
 
     if submitted_arb:
@@ -489,11 +554,12 @@ with tab_arb:
         T_range_arb = np.linspace(arb_T_lo, arb_T_hi, arb_n_pts)
         K_range_arb = S / m_range_arb
 
-        arb_surfaces = {
-            "price": np.zeros((arb_n_pts, arb_n_pts)),
-            "delta": np.zeros((arb_n_pts, arb_n_pts)),
-            "gamma": np.zeros((arb_n_pts, arb_n_pts)),
-        }
+        all_surf_names = ["price", "delta", "gamma", "fd_delta", "fd_gamma"]
+        fd_extra_names = ["theta", "vega", "rho", "d_theta_param", "d_nu"]
+        if arb_include_fd:
+            all_surf_names += fd_extra_names
+
+        arb_surfaces = {gn: np.zeros((arb_n_pts, arb_n_pts)) for gn in all_surf_names}
 
         total_steps = arb_n_pts * arb_n_pts
         progress_arb = st.progress(0, text=f"Computing mpmath surfaces ({arb_dps} dps)...")
@@ -502,20 +568,35 @@ with tab_arb:
         step = 0
         for i, t_val in enumerate(T_range_arb):
             for j, k_val in enumerate(K_range_arb):
-                px, dlt, gma, _, _, _ = vg_mpmath.call_price(
-                    S, r, q, sigma, theta_vg, nu, float(t_val), float(k_val)
-                )
-                arb_surfaces["price"][i, j] = float(px)
-                arb_surfaces["delta"][i, j] = float(dlt)
-                arb_surfaces["gamma"][i, j] = float(gma)
+                if arb_include_fd:
+                    g = vg_mpmath.all_greeks(S, r, q, sigma, theta_vg, nu, float(t_val), float(k_val))
+                    for gn in all_surf_names:
+                        arb_surfaces[gn][i, j] = float(g[gn])
+                else:
+                    px, dlt, gma, _, _, _ = vg_mpmath.call_price(
+                        S, r, q, sigma, theta_vg, nu, float(t_val), float(k_val)
+                    )
+                    fd_d = vg_mpmath.fd_delta(S, r, q, sigma, theta_vg, nu, float(t_val), float(k_val))
+                    fd_g = vg_mpmath.fd_gamma(S, r, q, sigma, theta_vg, nu, float(t_val), float(k_val))
+                    arb_surfaces["price"][i, j] = float(px)
+                    arb_surfaces["delta"][i, j] = float(dlt)
+                    arb_surfaces["gamma"][i, j] = float(gma)
+                    arb_surfaces["fd_delta"][i, j] = float(fd_d)
+                    arb_surfaces["fd_gamma"][i, j] = float(fd_g)
 
                 # Put-call parity adjustments
                 if arb_opt == "put":
-                    call_px = float(px)
-                    put_px = call_px - S * np.exp(-q * float(t_val)) + float(k_val) * np.exp(-r * float(t_val))
-                    arb_surfaces["price"][i, j] = put_px
-                    arb_surfaces["delta"][i, j] = float(dlt) - np.exp(-q * float(t_val))
-                    # gamma is same for call and put
+                    tv = float(t_val)
+                    kv = float(k_val)
+                    disc_S = S * np.exp(-q * tv)
+                    disc_K = kv * np.exp(-r * tv)
+                    arb_surfaces["price"][i, j] = arb_surfaces["price"][i, j] - disc_S + disc_K
+                    arb_surfaces["delta"][i, j] = arb_surfaces["delta"][i, j] - np.exp(-q * tv)
+                    arb_surfaces["fd_delta"][i, j] = arb_surfaces["fd_delta"][i, j] - np.exp(-q * tv)
+                    # gamma same for call/put
+                    if arb_include_fd:
+                        arb_surfaces["theta"][i, j] = arb_surfaces["theta"][i, j] + q * disc_S - r * disc_K
+                        arb_surfaces["rho"][i, j] = arb_surfaces["rho"][i, j] - kv * tv * np.exp(-r * tv)
 
                 step += 1
                 progress_arb.progress(step / total_steps)
@@ -525,11 +606,13 @@ with tab_arb:
 
         st.session_state["tab_arb"] = {
             "arb_surfaces": arb_surfaces,
+            "all_surf_names": all_surf_names,
             "m_range_arb": m_range_arb,
             "T_range_arb": T_range_arb,
             "t_arb_elapsed": t_arb_elapsed,
             "arb_dps": arb_dps,
             "arb_opt": arb_opt,
+            "arb_include_fd": arb_include_fd,
             "params_key": _sidebar_params_key(),
         }
 
@@ -537,12 +620,18 @@ with tab_arb:
         _ta = st.session_state["tab_arb"]
 
         st.metric("Computation Time", f"{_ta['t_arb_elapsed']:.2f} s")
-        st.info(f"Precision: **{_ta['arb_dps']}** decimal places  |  Option: **{_ta['arb_opt'].title()}**")
+        fd_note = " (incl. FD Greeks)" if _ta.get("arb_include_fd") else ""
+        st.info(f"Precision: **{_ta['arb_dps']}** dps{fd_note}  |  Option: **{_ta['arb_opt'].title()}**")
 
-        arb_labels = {"price": "Call Price" if _ta["arb_opt"] == "call" else "Put Price",
-                      "delta": "Delta", "gamma": "Gamma"}
+        arb_labels = {
+            "price": "Call Price" if _ta["arb_opt"] == "call" else "Put Price",
+            "delta": "Delta (analytical)", "gamma": "Gamma (analytical)",
+            "fd_delta": "Delta (FD)", "fd_gamma": "Gamma (FD)",
+            "theta": "Theta (FD)", "vega": "Vega (FD)", "rho": "Rho (FD)",
+            "d_theta_param": "d/d(theta_VG) (FD)", "d_nu": "d/d(nu) (FD)",
+        }
 
-        for gn in ["price", "delta", "gamma"]:
+        for gn in _ta["all_surf_names"]:
             fig_arb = go.Figure(data=[go.Surface(
                 x=_ta["m_range_arb"], y=_ta["T_range_arb"], z=_ta["arb_surfaces"][gn],
                 colorscale="Plasma",
