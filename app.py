@@ -5,11 +5,19 @@ import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-from variance_gamma import VarianceGammaModel, _HAS_TORCH
+from variance_gamma import VarianceGammaModel, _HAS_TORCH, _TORCH_DEVICE, _TORCH_GPU_NAME
 import vg_mpmath
 
 st.set_page_config(page_title="Variance Gamma Pricer", layout="wide")
 st.title("Variance Gamma Option Pricer")
+
+# ── Hardware info banner ──────────────────────────────────────────────────
+if _HAS_TORCH:
+    import torch
+    _dev_label = f"**GPU:** {_TORCH_GPU_NAME}" if _TORCH_GPU_NAME else f"**CPU only** (CUDA not available)"
+    st.caption(f"PyTorch {torch.__version__}  ·  Device: {_TORCH_DEVICE}  ·  {_dev_label}")
+else:
+    st.caption("PyTorch not installed — autodiff Greeks disabled")
 
 # ── Sidebar: model parameters ──────────────────────────────────────────────
 st.sidebar.header("Model Parameters")
@@ -53,6 +61,21 @@ def plot_3d_with_download(fig, filename, key_prefix=""):
 def _sidebar_params_key():
     """Return a tuple of sidebar params to detect changes."""
     return (S, r, q, sigma, nu, theta_vg)
+
+
+def _eta_text(label, step, total, t0):
+    """Return progress-bar text with ETA."""
+    frac = step / total
+    elapsed = time.perf_counter() - t0
+    if step > 0:
+        remaining = elapsed / step * (total - step)
+        if remaining >= 60:
+            eta_str = f"{remaining / 60:.1f} min"
+        else:
+            eta_str = f"{remaining:.0f}s"
+    else:
+        eta_str = "..."
+    return f"{label} — {step}/{total} ({frac:.0%}) · ETA {eta_str}"
 
 
 # ── Tabs ───────────────────────────────────────────────────────────────────
@@ -144,7 +167,8 @@ with tab_curves:
             g = model.greeks(k, T_curve, opt_type_curve)
             for gn in an_data:
                 an_data[gn].append(g[gn])
-            progress.progress((idx + 1) / len(K_arr))
+            progress.progress((idx + 1) / len(K_arr),
+                              text=_eta_text("Analytical Greeks", idx + 1, len(K_arr), t0_an))
         t_analytical = time.perf_counter() - t0_an
         progress.empty()
         for gn in an_data:
@@ -161,7 +185,8 @@ with tab_curves:
                 g = model.greeks_ad(k, T_curve, opt_type_curve)
                 for gn in ad_data:
                     ad_data[gn].append(g[gn])
-                progress2.progress((idx + 1) / len(K_arr))
+                progress2.progress((idx + 1) / len(K_arr),
+                                   text=_eta_text("Autodiff Greeks", idx + 1, len(K_arr), t0_ad))
             t_autodiff = time.perf_counter() - t0_ad
             progress2.empty()
             for gn in ad_data:
@@ -178,25 +203,29 @@ with tab_curves:
                           "d_theta_param": "d/d(theta_VG)", "d_nu": "d/d(nu)"}
 
         progress_3d = st.progress(0, text="Computing analytical 3D surfaces...")
+        t0_3d = time.perf_counter()
         an_surfaces = {gn: np.zeros((n_pts, n_pts)) for gn in surface_names}
         for i, t in enumerate(T_range):
             for j, k in enumerate(K_surf):
                 g = model.greeks(k, t, "call")
                 for gn in surface_names:
                     an_surfaces[gn][i, j] = g[gn]
-            progress_3d.progress((i + 1) / n_pts)
+            progress_3d.progress((i + 1) / n_pts,
+                                 text=_eta_text("Analytical 3D", i + 1, n_pts, t0_3d))
         progress_3d.empty()
 
         ad_surfaces = None
         if _HAS_TORCH:
             progress_3d_ad = st.progress(0, text="Computing autodiff 3D surfaces...")
+            t0_3d_ad = time.perf_counter()
             ad_surfaces = {gn: np.zeros((n_pts, n_pts)) for gn in surface_names}
             for i, t in enumerate(T_range):
                 for j, k in enumerate(K_surf):
                     g = model.greeks_ad(k, t, "call")
                     for gn in surface_names:
                         ad_surfaces[gn][i, j] = g[gn]
-                progress_3d_ad.progress((i + 1) / n_pts)
+                progress_3d_ad.progress((i + 1) / n_pts,
+                                        text=_eta_text("Autodiff 3D", i + 1, n_pts, t0_3d_ad))
             progress_3d_ad.empty()
 
         # Store everything in session_state
@@ -376,7 +405,8 @@ with tab_greeks:
             g = model.greeks(k, T_greek, opt_type_grk)
             for gn in greek_names:
                 data_an[gn].append(g[gn])
-            progress_an.progress((idx + 1) / len(K_arr))
+            progress_an.progress((idx + 1) / len(K_arr),
+                                 text=_eta_text("Analytical Greeks", idx + 1, len(K_arr), t0_an))
         t_an = time.perf_counter() - t0_an
         progress_an.empty()
 
@@ -391,7 +421,8 @@ with tab_greeks:
                 g = model.greeks_ad(k, T_greek, opt_type_grk)
                 for gn in greek_names:
                     data_ad[gn].append(g[gn])
-                progress_ad.progress((idx + 1) / len(K_arr))
+                progress_ad.progress((idx + 1) / len(K_arr),
+                                     text=_eta_text("Autodiff Greeks", idx + 1, len(K_arr), t0_ad))
             t_ad = time.perf_counter() - t0_ad
             progress_ad.empty()
 
@@ -530,7 +561,7 @@ with tab_arb:
             "Decimal places (dps)", value=30, min_value=10, max_value=200, step=5, key="arb_dps"
         ))
         arb_n_pts = int(ac2.number_input(
-            "Grid points", value=8, min_value=3, max_value=30, step=1, key="arb_npts"
+            "Grid points", value=8, min_value=3, max_value=1000, step=1, key="arb_npts"
         ))
         arb_opt = ac3.selectbox("Option Type", ["call", "put"], key="arb_opt")
 
@@ -599,7 +630,8 @@ with tab_arb:
                         arb_surfaces["rho"][i, j] = arb_surfaces["rho"][i, j] - kv * tv * np.exp(-r * tv)
 
                 step += 1
-                progress_arb.progress(step / total_steps)
+                progress_arb.progress(step / total_steps,
+                                      text=_eta_text(f"mpmath ({arb_dps} dps)", step, total_steps, t0_arb))
 
         t_arb_elapsed = time.perf_counter() - t0_arb
         progress_arb.empty()

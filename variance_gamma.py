@@ -23,8 +23,16 @@ from scipy.optimize import minimize, differential_evolution
 try:
     import torch
     _HAS_TORCH = True
+    if torch.cuda.is_available():
+        _TORCH_DEVICE = torch.device("cuda")
+        _TORCH_GPU_NAME = torch.cuda.get_device_name(0)
+    else:
+        _TORCH_DEVICE = torch.device("cpu")
+        _TORCH_GPU_NAME = None
 except ImportError:
     _HAS_TORCH = False
+    _TORCH_DEVICE = None
+    _TORCH_GPU_NAME = None
 
 
 # ---------------------------------------------------------------------------
@@ -379,8 +387,9 @@ class VarianceGammaModel:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _torch_simpson_weights(N: int):
-        w = torch.ones(N, dtype=torch.float64)
+    def _torch_simpson_weights(N: int, device=None):
+        dev = device or _TORCH_DEVICE
+        w = torch.ones(N, dtype=torch.float64, device=dev)
         w[0] = 1.0
         w[1::2] = 4.0
         w[2::2] = 2.0
@@ -396,20 +405,23 @@ class VarianceGammaModel:
         All of S, r, q, sigma, nu, theta_vg, K_val, T_val may be
         torch tensors with requires_grad=True.  The returned scalar
         supports torch.autograd.grad.
+
+        Automatically runs on GPU if CUDA is available, otherwise CPU.
         """
+        dev = S.device  # inherit device from input tensors
         lam = 2.0 * np.pi / (N * eta)
         b = N * lam / 2.0
 
-        j = torch.arange(N, dtype=torch.float64)
+        j = torch.arange(N, dtype=torch.float64, device=dev)
         u_real = j * eta                        # real-valued grid
 
         # Simpson weights (constant, no grad needed)
-        sw = VarianceGammaModel._torch_simpson_weights(N)
+        sw = VarianceGammaModel._torch_simpson_weights(N, device=dev)
 
         # --- characteristic function at v = u - (alpha+1)*i -----------
         # We work with real / imag parts via torch complex tensors.
         v_real = u_real
-        v_imag = -(alpha + 1.0) * torch.ones(N, dtype=torch.float64)
+        v_imag = -(alpha + 1.0) * torch.ones(N, dtype=torch.float64, device=dev)
         v = torch.complex(v_real, v_imag)       # shape (N,)
 
         # omega (martingale correction)
@@ -426,7 +438,7 @@ class VarianceGammaModel:
         phi = torch.exp(drift + vg_exp)
 
         # --- Carr-Madan integrand -------------------------------------
-        u_cpx = torch.complex(u_real, torch.zeros(N, dtype=torch.float64))
+        u_cpx = torch.complex(u_real, torch.zeros(N, dtype=torch.float64, device=dev))
         denom = (alpha ** 2 + alpha - u_cpx ** 2
                  + 1j * (2.0 * alpha + 1.0) * u_cpx)
 
@@ -435,7 +447,7 @@ class VarianceGammaModel:
         # --- FFT ------------------------------------------------------
         shift = torch.exp(
             torch.complex(
-                torch.zeros(N, dtype=torch.float64),
+                torch.zeros(N, dtype=torch.float64, device=dev),
                 b * u_real
             )
         )
@@ -447,8 +459,8 @@ class VarianceGammaModel:
 
         # --- interpolate to desired log-strike ------------------------
         log_K = torch.log(K_val)
-        # linear interp via searchsorted
-        idx = torch.searchsorted(k_grid, log_K.detach()).clamp(1, N - 1)
+        # linear interp via searchsorted (must be on CPU for searchsorted)
+        idx = torch.searchsorted(k_grid.cpu(), log_K.detach().cpu()).clamp(1, N - 1).to(dev)
         k_lo = k_grid[idx - 1]
         k_hi = k_grid[idx]
         c_lo = call_grid[idx - 1]
@@ -470,15 +482,16 @@ class VarianceGammaModel:
             raise ImportError("PyTorch is required for greeks_ad(). "
                               "Install with:  pip install torch")
 
-        # Build differentiable scalars
-        S_t = torch.tensor(self.S, dtype=torch.float64, requires_grad=True)
-        r_t = torch.tensor(self.r, dtype=torch.float64, requires_grad=True)
-        q_t = torch.tensor(self.q, dtype=torch.float64, requires_grad=True)
-        sigma_t = torch.tensor(self.sigma, dtype=torch.float64, requires_grad=True)
-        nu_t = torch.tensor(self.nu, dtype=torch.float64, requires_grad=True)
-        theta_t = torch.tensor(self.theta, dtype=torch.float64, requires_grad=True)
-        T_t = torch.tensor(T, dtype=torch.float64, requires_grad=True)
-        K_t = torch.tensor(float(K), dtype=torch.float64)
+        # Build differentiable scalars on the best available device
+        dev = _TORCH_DEVICE
+        S_t = torch.tensor(self.S, dtype=torch.float64, device=dev, requires_grad=True)
+        r_t = torch.tensor(self.r, dtype=torch.float64, device=dev, requires_grad=True)
+        q_t = torch.tensor(self.q, dtype=torch.float64, device=dev, requires_grad=True)
+        sigma_t = torch.tensor(self.sigma, dtype=torch.float64, device=dev, requires_grad=True)
+        nu_t = torch.tensor(self.nu, dtype=torch.float64, device=dev, requires_grad=True)
+        theta_t = torch.tensor(self.theta, dtype=torch.float64, device=dev, requires_grad=True)
+        T_t = torch.tensor(T, dtype=torch.float64, device=dev, requires_grad=True)
+        K_t = torch.tensor(float(K), dtype=torch.float64, device=dev)
 
         # Forward pass — call price
         call = self._torch_price_call(
