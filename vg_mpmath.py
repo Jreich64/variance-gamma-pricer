@@ -228,21 +228,70 @@ def all_greeks(S_0, r, q, sigma, theta, nu, t, K):
     Returns dict with: price, delta, gamma (analytical via quadrature),
     fd_delta, fd_gamma, theta, vega, rho, d_theta_param, d_nu (all FD).
 
-    Integral count: 3 (call_price) + 17×2 (FD bumps using _price_only) = 37
-    vs 51 previously when every FD call used full call_price with gamma.
+    Optimised integral count
+    ────────────────────────
+    • call_price       → 3 integrals (pi_1, pi_2, analytical gamma)
+    • S bumps (shared)  → 2 × 2 = 4  (S+ε, S−ε — reuse px as centre)
+      ↳ fd_delta + fd_gamma from the same 2 bumped prices + px
+    • T bumps           → 2 × 2 = 4
+    • σ bumps           → 2 × 2 = 4
+    • r bumps           → 2 × 2 = 4
+    • θ_VG bumps        → 2 × 2 = 4
+    • ν bumps           → 2 × 2 = 4
+    Total: 27 integrals  (was 33 before, 51 originally)
     """
+    # ── 1. Analytical price, delta, gamma (3 integrals) ──────────────
     px, dlt, gma, e1, e2, e3 = call_price(S_0, r, q, sigma, theta, nu, t, K)
+
+    # ── 2. S bumps: shared for fd_delta AND fd_gamma (4 integrals) ───
+    eps_S = mp.mpf("1e-20")
+    p_S_up = _price_only(mp.fadd(S_0, eps_S), r, q, sigma, theta, nu, t, K)
+    p_S_dn = _price_only(mp.fsub(S_0, eps_S), r, q, sigma, theta, nu, t, K)
+    fd_dlt = mp.fdiv(mp.fsub(p_S_up, p_S_dn), mp.fmul(2, eps_S))
+    fd_gma = mp.fdiv(
+        mp.fadd(mp.fsub(p_S_up, mp.fmul(2, px)), p_S_dn),
+        mp.fmul(eps_S, eps_S),
+    )
+
+    # ── 3. Remaining FD Greeks (5 pairs × 4 integrals = 20) ─────────
+    eps = mp.mpf("1e-10")
+
+    # theta (dC/dT)
+    p_t_up = _price_only(S_0, r, q, sigma, theta, nu, float(mp.fadd(t, eps)), K)
+    p_t_dn = _price_only(S_0, r, q, sigma, theta, nu, float(mp.fsub(t, eps)), K)
+    fd_th = mp.fdiv(mp.fsub(p_t_up, p_t_dn), mp.fmul(2, eps))
+
+    # vega (dC/dσ)
+    p_sig_up = _price_only(S_0, r, q, float(mp.fadd(sigma, eps)), theta, nu, t, K)
+    p_sig_dn = _price_only(S_0, r, q, float(mp.fsub(sigma, eps)), theta, nu, t, K)
+    fd_vg = mp.fdiv(mp.fsub(p_sig_up, p_sig_dn), mp.fmul(2, eps))
+
+    # rho (dC/dr)
+    p_r_up = _price_only(S_0, float(mp.fadd(r, eps)), q, sigma, theta, nu, t, K)
+    p_r_dn = _price_only(S_0, float(mp.fsub(r, eps)), q, sigma, theta, nu, t, K)
+    fd_rh = mp.fdiv(mp.fsub(p_r_up, p_r_dn), mp.fmul(2, eps))
+
+    # d/d(theta_VG)
+    p_thp_up = _price_only(S_0, r, q, sigma, float(mp.fadd(theta, eps)), nu, t, K)
+    p_thp_dn = _price_only(S_0, r, q, sigma, float(mp.fsub(theta, eps)), nu, t, K)
+    fd_thp = mp.fdiv(mp.fsub(p_thp_up, p_thp_dn), mp.fmul(2, eps))
+
+    # d/d(nu)
+    p_nu_up = _price_only(S_0, r, q, sigma, theta, float(mp.fadd(nu, eps)), t, K)
+    p_nu_dn = _price_only(S_0, r, q, sigma, theta, float(mp.fsub(nu, eps)), t, K)
+    fd_nv = mp.fdiv(mp.fsub(p_nu_up, p_nu_dn), mp.fmul(2, eps))
+
     return {
         "price": px,
         "delta": dlt,
         "gamma": gma,
-        "fd_delta": fd_delta(S_0, r, q, sigma, theta, nu, t, K),
-        "fd_gamma": fd_gamma(S_0, r, q, sigma, theta, nu, t, K),
-        "theta": fd_theta(S_0, r, q, sigma, theta, nu, t, K),
-        "vega": fd_vega(S_0, r, q, sigma, theta, nu, t, K),
-        "rho": fd_rho(S_0, r, q, sigma, theta, nu, t, K),
-        "d_theta_param": fd_theta_param(S_0, r, q, sigma, theta, nu, t, K),
-        "d_nu": fd_nu(S_0, r, q, sigma, theta, nu, t, K),
+        "fd_delta": fd_dlt,
+        "fd_gamma": fd_gma,
+        "theta": fd_th,
+        "vega": fd_vg,
+        "rho": fd_rh,
+        "d_theta_param": fd_thp,
+        "d_nu": fd_nv,
     }
 
 
